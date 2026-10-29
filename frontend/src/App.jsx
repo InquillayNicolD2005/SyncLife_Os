@@ -984,7 +984,7 @@ export default function App() {
       };
 
       setDataApi(fallback);
-      setApiError('No se pudo conectar con el backend. Se guardó un cálculo local aproximado; clima, tipo de cambio y nutrición no se consultaron.');
+      setApiError('');
       return fallback;
     }
   };
@@ -1373,7 +1373,14 @@ export default function App() {
             })[vista]}</p>
           </div>
           <div className="header-actions">
-            <div className="api-status"><span className={`status-dot ${apiError ? 'is-error' : dataApi ? 'is-online' : ''}`} />{apiError ? 'Revisar conexión' : dataApi ? 'Datos sincronizados' : 'Listo para sincronizar'}</div>
+            <div
+              className="api-status"
+              title={dataApi?.serviciosDisponibles === false ? 'Backend no disponible. Se muestran cálculos locales aproximados; clima, tipo de cambio y nutrición no están sincronizados.' : undefined}
+              aria-label={dataApi?.serviciosDisponibles === false ? 'Modo simulación local. Datos externos no sincronizados.' : undefined}
+            >
+              <span className={`status-dot ${apiError ? 'is-error' : dataApi?.serviciosDisponibles === false ? 'is-simulated' : dataApi ? 'is-online' : ''}`} />
+              {apiError ? 'Revisar conexión' : dataApi?.serviciosDisponibles === false ? 'Modo simulación' : dataApi ? 'Datos sincronizados' : 'Listo para sincronizar'}
+            </div>
             <button className="icon-button help-button" aria-label="Ver recorrido guiado" data-tooltip="Ver recorrido guiado" onClick={() => setTourStep(0)}><HelpCircle size={18} /></button>
             <button className="icon-button notification-button" aria-label="Notificaciones pendientes" aria-expanded={notificationsOpen} data-tooltip="Ver tareas y recordatorios pendientes" onClick={() => setNotificationsOpen((open) => !open)}>
               <Bell size={19} />
@@ -1397,7 +1404,7 @@ export default function App() {
           </div>
         </header>
 
-        {apiError && <div className="alert-banner" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Cerrar alerta">×</button></div>}
+        {apiError && dataApi?.serviciosDisponibles !== false && <div className="alert-banner" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Cerrar alerta">×</button></div>}
         {notification && <div className="toast-message" role="status">{notification}<button onClick={() => setNotification('')} aria-label="Cerrar notificación">×</button></div>}
 
         {vista === 'inicio' && (

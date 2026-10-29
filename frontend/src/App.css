@@ -83,6 +83,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #dfd2c3; }
 .status-dot.is-online { background: var(--green); box-shadow: 0 0 8px rgba(138,155,99,0.35); }
 .status-dot.is-error { background: var(--red); }
+.status-dot.is-simulated { background: #c28a3a; }
 .icon-button { position: relative; display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: #38433f; background: var(--surface); cursor: pointer; }
 .icon-button:hover { border-color: var(--blue); color: #1c2120; }
 .icon-button i { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; border: 1px solid var(--surface); border-radius: 50%; background: var(--blue); }
