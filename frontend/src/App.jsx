@@ -27,7 +27,12 @@ const STORAGE_KEYS = {
 };
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
-const apiUrl = (path) => `${API_BASE_URL}${path}`;
+const apiUrl = (path) => {
+  if (import.meta.env.PROD && !API_BASE_URL) {
+    throw new Error('Falta VITE_API_URL en Vercel. Configúrala con la URL del backend en Render y vuelve a desplegar.');
+  }
+  return `${API_BASE_URL}${path}`;
+};
 
 const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 const expenseCategories = ['Alimentación', 'Transporte', 'Ropa', 'Medicamentos', 'Hogar', 'Ocio', 'Otros'];

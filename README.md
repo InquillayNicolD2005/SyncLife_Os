@@ -12,17 +12,17 @@ npm ci --prefix frontend
 
 Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el puerto `3002` para evitar conflictos con servicios que ya ocupen los puertos `3000` o `3001`; el frontend de Vite envía `/api` al backend en `127.0.0.1:3002`. En producción, el backend respeta el puerto asignado por la plataforma mediante `PORT`.
 
-## Despliegue multiservicio en Vercel
+## Despliegue: backend en Render y frontend en Vercel
 
-El archivo raíz `vercel.json` configura dos servicios: `backend` (Express, con `backend/server.js` como punto de entrada) y `frontend` (Vite). Las rutas públicas `/api/*` se envían al backend y el resto al frontend. Al importar el repositorio en Vercel, usa la raíz del repositorio (`./`) y el preset **Services** para que se aplique esta configuración.
+El servicio existente `SyncLife_Os` en Render debe usar la raíz `backend`, instalar con `npm ci` e iniciar con `npm start`. Configura `npm_config_build_from_source=true` en Render para que `sqlite3` compile dentro del entorno del servicio y no descargue un binario que requiere una versión de glibc distinta. Render define `PORT` automáticamente; `3002` es solo el valor predeterminado local. Comprueba disponibilidad en `/api/health`.
 
-Configura las claves del proveedor de IA como variables de entorno privadas en la plataforma de despliegue. En local, `backend/.env` es compatible y está excluido de Git. No incluyas claves `VITE_*` en el frontend. El clima usa proveedores externos sin clave.
+En Render, configura `CORS_ORIGINS` con `https://synclifeos.vercel.app`. Añade `AI_PROVIDER=gemini`, `GEMINI_MODEL=gemini-3.8-flash` y una clave válida en `GEMINI_API_KEY` desde el panel de Render. No subas claves al repositorio ni las pongas en variables `VITE_*`.
 
-## Despliegue del backend en Render
+El proyecto de producción `synclifeos` en Vercel debe conservar la raíz del repositorio (`.`). El `vercel.json` raíz instala y compila el frontend de `frontend` y publica `frontend/dist` con rutas SPA. En **Environment Variables** de Vercel, establece `VITE_API_URL=https://synclife-os.onrender.com` para Production y vuelve a desplegar. La aplicación falla con un mensaje explícito si falta esta variable, en vez de enviar las peticiones a rutas API del mismo dominio Vercel.
 
-Para alojar el backend en Render y el frontend en Vercel, crea un servicio web de Node.js con `backend` como directorio raíz y `npm start` como comando de inicio. El servidor escucha `process.env.PORT` en Render; el puerto `3002` es solo el valor predeterminado local. Configura `CORS_ORIGINS` en Render con el origen exacto del frontend de Vercel (por ejemplo, `https://tu-app.vercel.app`); admite varios orígenes separados por comas. En Vercel, configura `VITE_API_URL` con la URL base de Render (por ejemplo, `https://tu-backend.onrender.com`) y vuelve a desplegar el frontend. Sin `VITE_API_URL`, el frontend conserva las rutas relativas usadas por el despliegue multiservicio de Vercel y el proxy local de Vite.
+Comprueba `https://synclife-os.onrender.com/api/health` y `https://synclife-os.onrender.com/api/synclife/ai/status`: el primero debe devolver `status: "ok"` y el segundo debe indicar `configured: true`. El clima no necesita clave; las tasas de cambio usan ExchangeRate-API y Frankfurter con respaldos aproximados. La IA y las finanzas requieren conectividad desde Render a sus proveedores externos.
 
-SQLite guarda datos en `backend/synclife.db` por defecto. El sistema de archivos de Vercel Functions no es almacenamiento persistente, por lo que la base local no es adecuada para conservar datos entre ejecuciones o despliegues; migra a una base de datos externa si necesitas persistencia.
+SQLite guarda datos en `backend/synclife.db` por defecto. El disco de un servicio Render sin almacenamiento persistente no garantiza conservar la base tras reinicios o despliegues; usa un disco persistente de Render o una base de datos externa si necesitas conservar registros.
 
 ## Disponibilidad de servicios externos
 

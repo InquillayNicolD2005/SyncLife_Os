@@ -42,7 +42,7 @@ function getAIConfig() {
     openai: { apiKey: getValue('OPENAI_API_KEY'), model: getValue('OPENAI_MODEL') || 'gpt-4o-mini' },
   };
   if (!settings[provider]) {
-    const error = new Error('AI_PROVIDER debe ser "gemini" o "openai" en backend/.env.');
+    const error = new Error('AI_PROVIDER debe ser "gemini" o "openai" en las variables de entorno del backend.');
     error.status = 503;
     throw error;
   }
@@ -97,7 +97,7 @@ async function generateWithAI(prompt) {
         : response.status === 429
           ? `Se alcanzó el límite o la cuota de ${providerName}. Revisa la facturación y vuelve a intentarlo más tarde.`
           : response.status === 404 && provider === 'gemini'
-            ? `Gemini no encontró el modelo "${model}" (404). Revisa GEMINI_MODEL en las variables de Vercel; prueba con gemini-3.8-flash y vuelve a desplegar.`
+            ? `Gemini no encontró el modelo "${model}" (404). Revisa GEMINI_MODEL en las variables de entorno del backend y vuelve a desplegar.`
           : `${providerName} no pudo generar la recomendación. Verifica la clave, el modelo y los límites de la API${apiError ? ` (${response.status}).` : '.'}`;
       const error = new Error(message);
       error.status = 502;
@@ -143,6 +143,17 @@ app.get('/api/synclife/ai/status', (req, res) => {
   } catch (error) {
     return res.status(error.status || 500).json({ error: error.message });
   }
+});
+
+app.get('/api/health', (req, res) => {
+  let ai;
+  try {
+    const config = getAIConfig();
+    ai = { provider: config.provider, configured: Boolean(config.apiKey) };
+  } catch (error) {
+    ai = { configured: false, error: error.message };
+  }
+  return res.json({ status: 'ok', ai, timestamp: new Date().toISOString() });
 });
 
 app.get('/api/synclife/weather', async (req, res) => {
