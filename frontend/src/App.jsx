@@ -806,6 +806,7 @@ export default function App() {
         source: result.source,
         estimatedAt: result.estimatedAt,
         basis: result.basis,
+        recommendation: result.recommendation,
       });
     } catch (error) {
       console.error('No se pudo estimar la nutrición de la comida:', error);
@@ -839,6 +840,7 @@ export default function App() {
         source: mealNutritionEstimate?.source || 'Registro manual',
         estimatedAt: mealNutritionEstimate?.estimatedAt || null,
         basis: mealNutritionEstimate?.basis || '',
+        recommendation: mealNutritionEstimate?.recommendation || '',
       },
     }].sort((first, second) => first.date.localeCompare(second.date)));
     setNotification(`${mealTypeLabels[mealType] || mealType} añadido a tu plan para el ${dateLabel(new Date(`${mealDate}T12:00:00`), { day: 'numeric', month: 'long' })}.`);
@@ -1227,6 +1229,7 @@ export default function App() {
         portion: item.nutrition?.portion || '',
         source: item.nutrition?.source || '',
         basis: item.nutrition?.basis || '',
+        recommendation: typeof item.nutrition?.recommendation === 'string' ? item.nutrition.recommendation.trim() : '',
         recordedNutrients,
         micronutrients: typeof item.nutrition?.micronutrients === 'string' ? item.nutrition.micronutrients.trim() : '',
       };
@@ -1837,7 +1840,7 @@ export default function App() {
                     <Sparkles size={15} /> {isEstimatingMealNutrition ? 'Estimando nutrientes…' : 'Estimar con IA'}
                   </button>
                   {mealNutritionError && <p className="nutrition-estimate-message is-error" role="alert">{mealNutritionError}</p>}
-                  {mealNutritionEstimate && <p className="nutrition-estimate-message" role="status">Estimación de {mealNutritionEstimate.source} lista. Revísala y corrige los campos si hace falta antes de guardar. Los valores que la IA no pudo estimar quedan vacíos.{mealNutritionEstimate.basis ? ` Supuesto: ${mealNutritionEstimate.basis}` : ''}</p>}
+                  {mealNutritionEstimate && <div className="nutrition-estimate-message" role="status"><strong>Recomendación de {mealNutritionEstimate.source}:</strong> {mealNutritionEstimate.recommendation}<br />Estimación nutricional lista; revísala antes de guardar. Los valores que la IA no pudo estimar quedan vacíos.{mealNutritionEstimate.basis ? ` Supuesto: ${mealNutritionEstimate.basis}` : ''}</div>}
                   <div className="meal-nutrient-fields">
                     <div className="field"><label htmlFor="meal-fiber">Fibra (g)</label><input id="meal-fiber" type="number" min="0" step="0.1" value={mealFiber} onChange={(event) => setMealFiber(event.target.value)} placeholder="Ej. 4.5" /></div>
                     <div className="field"><label htmlFor="meal-sodium">Sodio (mg)</label><input id="meal-sodium" type="number" min="0" step="1" value={mealSodium} onChange={(event) => setMealSodium(event.target.value)} placeholder="Ej. 320" /></div>
@@ -1851,7 +1854,7 @@ export default function App() {
                 <div className="planned-meals-heading"><h3>Mi plan de comidas</h3><p>Cada plato aparece con su tipo, fecha y costo para que puedas revisar tu semana.</p></div>
                 {mealPlans.length ? mealPlans.map((item) => (
                   <div className="planned-meal" key={item.id}>
-                    <div><strong>{item.name}</strong><small><span className="planned-meal-type">{mealTypeLabels[item.type] || item.type}</span> · {dateLabel(new Date(`${item.date}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })}</small>{(item.nutrition?.fiberG != null || item.nutrition?.sodiumMg != null || item.nutrition?.addedSugarG != null || item.nutrition?.micronutrients) && <small className="planned-meal-nutrition">Nutrientes registrados: {item.nutrition.fiberG != null ? `fibra ${item.nutrition.fiberG} g` : ''}{item.nutrition.sodiumMg != null ? `${item.nutrition.fiberG != null ? ' · ' : ''}sodio ${item.nutrition.sodiumMg} mg` : ''}{item.nutrition.addedSugarG != null ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null ? ' · ' : ''}azúcares añadidos ${item.nutrition.addedSugarG} g` : ''}{item.nutrition.micronutrients ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null || item.nutrition.addedSugarG != null ? ' · ' : ''}${item.nutrition.micronutrients}` : ''}</small>}</div>
+                    <div><strong>{item.name}</strong><small><span className="planned-meal-type">{mealTypeLabels[item.type] || item.type}</span> · {dateLabel(new Date(`${item.date}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })}</small>{(item.nutrition?.fiberG != null || item.nutrition?.sodiumMg != null || item.nutrition?.addedSugarG != null || item.nutrition?.micronutrients) && <small className="planned-meal-nutrition">Nutrientes registrados: {item.nutrition.fiberG != null ? `fibra ${item.nutrition.fiberG} g` : ''}{item.nutrition.sodiumMg != null ? `${item.nutrition.fiberG != null ? ' · ' : ''}sodio ${item.nutrition.sodiumMg} mg` : ''}{item.nutrition.addedSugarG != null ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null ? ' · ' : ''}azúcares añadidos ${item.nutrition.addedSugarG} g` : ''}{item.nutrition.micronutrients ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null || item.nutrition.addedSugarG != null ? ' · ' : ''}${item.nutrition.micronutrients}` : ''}</small>}{item.nutrition?.recommendation && <small className="planned-meal-nutrition"><strong>Recomendación:</strong> {item.nutrition.recommendation}</small>}</div>
                     <strong>{currency(item.cost)}</strong>
                     <button aria-label={`Eliminar ${item.name}`} onClick={() => setMealPlans((current) => current.filter((meal) => meal.id !== item.id))}><Trash2 size={15} /></button>
                   </div>
