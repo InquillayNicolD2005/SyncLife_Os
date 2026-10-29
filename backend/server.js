@@ -281,7 +281,7 @@ if (fs.existsSync(frontendDist)) {
 }
 
 const port = Number(process.env.PORT) || 3002;
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server SyncLife con SQLite en http://localhost:${port}`);
   try {
     const config = getAIConfig();
