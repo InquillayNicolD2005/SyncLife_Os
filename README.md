@@ -14,7 +14,7 @@ Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el pu
 
 ## Despliegue: backend en Render y frontend en Vercel
 
-El servicio existente `SyncLife_Os` en Render debe usar la raíz `backend`, instalar con `npm ci` e iniciar con `npm start`. Configura `npm_config_build_from_source=true` en Render para que `sqlite3` compile dentro del entorno del servicio y no descargue un binario que requiere una versión de glibc distinta. Render define `PORT` automáticamente; `3002` es solo el valor predeterminado local. Comprueba disponibilidad en `/api/health`.
+El servicio existente `SyncLife_Os` en Render debe usar la raíz `backend`, el comando de build `npm ci && npm rebuild sqlite3 --build-from-source` y el comando de inicio `npm start`. La recompilación evita reutilizar un binario de `sqlite3` que requiere una versión de glibc distinta. Render define `PORT` automáticamente; `3002` es solo el valor predeterminado local. Comprueba disponibilidad en `/api/health`.
 
 En Render, configura `CORS_ORIGINS` con `https://synclifeos.vercel.app`. Añade `AI_PROVIDER=gemini`, `GEMINI_MODEL=gemini-3.8-flash` y una clave válida en `GEMINI_API_KEY` desde el panel de Render. No subas claves al repositorio ni las pongas en variables `VITE_*`.
 
