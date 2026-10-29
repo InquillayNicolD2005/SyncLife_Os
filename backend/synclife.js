@@ -10,6 +10,31 @@ if (process.env.SQLITE_DB_PATH) fs.mkdirSync(path.dirname(dbPath), { recursive: 
 const db = new sqlite3.Database(dbPath);
 const serviceCache = new Map();
 const EXTERNAL_API_TIMEOUT_MS = 7000;
+const WEATHER_CACHE_TTL_MS = 10 * 60 * 1000;
+const WEATHER_API_TIMEOUT_MS = 5000;
+const WEATHER_DESCRIPTIONS = {
+  0: 'Despejado',
+  1: 'Mayormente despejado',
+  2: 'Parcialmente nublado',
+  3: 'Nublado',
+  45: 'Niebla',
+  48: 'Niebla con escarcha',
+  51: 'Llovizna ligera',
+  53: 'Llovizna',
+  55: 'Llovizna intensa',
+  61: 'Lluvia ligera',
+  63: 'Lluvia',
+  65: 'Lluvia fuerte',
+  71: 'Nieve ligera',
+  73: 'Nieve',
+  75: 'Nieve fuerte',
+  80: 'Chubascos ligeros',
+  81: 'Chubascos',
+  82: 'Chubascos fuertes',
+  95: 'Tormenta',
+  96: 'Tormenta con granizo',
+  99: 'Tormenta fuerte con granizo',
+};
 
 // Inicialización de tablas
 db.serialize(() => {
@@ -52,9 +77,9 @@ db.serialize(() => {
   `);
 });
 
-async function fetchJson(url) {
+async function fetchJson(url, timeoutMs = EXTERNAL_API_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EXTERNAL_API_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
       headers: { 'User-Agent': 'SyncLifeOS/1.0', Accept: 'application/json' },
@@ -68,16 +93,35 @@ async function fetchJson(url) {
 }
 
 async function consultarOpenMeteo(ciudad) {
-  const geoData = await fetchJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(ciudad)}&count=1&language=es`);
+  const geoData = await fetchJson(
+    `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(ciudad)}&count=1&language=es`,
+    WEATHER_API_TIMEOUT_MS,
+  );
   const location = geoData.results?.[0];
   if (!location) throw new Error(`Open-Meteo no encontró la ciudad ${ciudad}.`);
 
-  const weatherData = await fetchJson(`https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}&current_weather=true`);
-  const temperature = Number(weatherData.current_weather?.temperature);
-  if (!Number.isFinite(temperature)) throw new Error('Open-Meteo no devolvió la temperatura actual.');
+  const weatherData = await fetchJson(
+    `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}&current=temperature_2m,wind_speed_10m,weather_code&timezone=auto`,
+    WEATHER_API_TIMEOUT_MS,
+  );
+  const current = weatherData.current;
+  const temperature = current?.temperature_2m;
+  if (typeof temperature !== 'number' || !Number.isFinite(temperature)) {
+    throw new Error('Open-Meteo no devolvió la temperatura actual.');
+  }
+  const windSpeed = current.wind_speed_10m;
+  const weatherCode = Number(current.weather_code);
   return {
     ciudad: location.name,
+    pais: location.country,
     temp: temperature,
+    temperatura: temperature,
+    viento: typeof windSpeed === 'number' && Number.isFinite(windSpeed) ? windSpeed : null,
+    descripcion: WEATHER_DESCRIPTIONS[weatherCode] || 'Sin descripción',
+    unidades: {
+      temperatura: weatherData.current_units?.temperature_2m || '°C',
+      viento: weatherData.current_units?.wind_speed_10m || 'km/h',
+    },
     lat: location.latitude,
     lon: location.longitude,
     source: 'Open-Meteo',
@@ -124,11 +168,16 @@ function leerClimaCache(ciudad) {
 async function obtenerClima(ciudad = "Cusco") {
   const city = typeof ciudad === 'string' && ciudad.trim() ? ciudad.trim() : 'Cusco';
   const cacheKey = `weather:${city.toLocaleLowerCase('es')}`;
+  const cachedEntry = serviceCache.get(cacheKey);
+  if (cachedEntry && Date.now() - cachedEntry.cachedAt < WEATHER_CACHE_TTL_MS) {
+    return cachedEntry.data;
+  }
+
   try {
     const result = await Promise.any([consultarOpenMeteo(city), consultarWttr(city)]);
     result.updatedAt = new Date().toISOString();
     result.stale = false;
-    serviceCache.set(cacheKey, result);
+    serviceCache.set(cacheKey, { data: result, cachedAt: Date.now() });
     try {
       await guardarClimaCache(cacheKey, result);
     } catch (cacheError) {
@@ -138,11 +187,11 @@ async function obtenerClima(ciudad = "Cusco") {
   } catch (error) {
     const errors = error.errors || [error];
     console.error('No se pudo consultar ningún proveedor del clima:', errors.map((item) => item.message).join('; '));
-    let cached = serviceCache.get(cacheKey);
+    let cached = cachedEntry?.data;
     if (!cached) {
       try {
         cached = await leerClimaCache(cacheKey);
-        if (cached) serviceCache.set(cacheKey, cached);
+        if (cached) serviceCache.set(cacheKey, { data: cached, cachedAt: Date.now() });
       } catch (cacheError) {
         console.error('No se pudo leer el último clima guardado en SQLite:', cacheError.message);
       }
