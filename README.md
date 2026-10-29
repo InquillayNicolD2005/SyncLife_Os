@@ -12,13 +12,13 @@ npm ci --prefix frontend
 
 Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el puerto `3002` para evitar conflictos con servicios que ya ocupen los puertos `3000` o `3001`; el frontend de Vite envía `/api` al backend en `127.0.0.1:3002`. En producción, el backend respeta el puerto asignado por la plataforma mediante `PORT`.
 
-## Compilación y despliegue en un solo servicio
+## Despliegue multiservicio en Vercel
 
-Ejecuta `npm run build` para generar `frontend/dist` y `npm start` para servir la aplicación y las rutas `/api` desde el backend. Configura el servicio para instalar las dependencias raíz, de `backend` y de `frontend` antes de compilar.
+El archivo raíz `vercel.json` configura dos servicios: `backend` (Express, con `backend/server.js` como punto de entrada) y `frontend` (Vite). Las rutas públicas `/api/*` se envían al backend y el resto al frontend. Al importar el repositorio en Vercel, usa la raíz del repositorio (`./`) y el preset **Services** para que se aplique esta configuración.
 
-Configura las claves del proveedor de IA como variables de entorno privadas en la plataforma de despliegue. En local, `backend/.env` es compatible y está excluido de Git. No incluyas claves `VITE_*` en el frontend.
+Configura las claves del proveedor de IA como variables de entorno privadas en la plataforma de despliegue. En local, `backend/.env` es compatible y está excluido de Git. No incluyas claves `VITE_*` en el frontend. El clima usa proveedores externos sin clave.
 
-SQLite guarda datos en `backend/synclife.db` por defecto. En despliegues, configura un disco persistente y establece `SQLITE_DB_PATH` a una ruta dentro de ese disco; el almacenamiento efímero puede perder la base de datos al reiniciar o republicar.
+SQLite guarda datos en `backend/synclife.db` por defecto. El sistema de archivos de Vercel Functions no es almacenamiento persistente, por lo que la base local no es adecuada para conservar datos entre ejecuciones o despliegues; migra a una base de datos externa si necesitas persistencia.
 
 ## Disponibilidad de servicios externos
 
