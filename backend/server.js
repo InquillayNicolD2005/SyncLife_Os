@@ -27,7 +27,7 @@ function getAIConfig() {
   const getValue = (name) => (process.env[name] || fileEnvironment[name] || '').trim();
   const provider = (getValue('AI_PROVIDER') || 'gemini').toLowerCase();
   const settings = {
-    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-2.5-flash' },
+    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-3.8-flash' },
     openai: { apiKey: getValue('OPENAI_API_KEY'), model: getValue('OPENAI_MODEL') || 'gpt-4o-mini' },
   };
   if (!settings[provider]) {
@@ -85,6 +85,8 @@ async function generateWithAI(prompt) {
         ? `La clave de ${providerName} fue rechazada. Verifica que sea válida y que tenga habilitada la API.`
         : response.status === 429
           ? `Se alcanzó el límite o la cuota de ${providerName}. Revisa la facturación y vuelve a intentarlo más tarde.`
+          : response.status === 404 && provider === 'gemini'
+            ? `Gemini no encontró el modelo "${model}" (404). Revisa GEMINI_MODEL en las variables de Vercel; prueba con gemini-3.8-flash y vuelve a desplegar.`
           : `${providerName} no pudo generar la recomendación. Verifica la clave, el modelo y los límites de la API${apiError ? ` (${response.status}).` : '.'}`;
       const error = new Error(message);
       error.status = 502;
