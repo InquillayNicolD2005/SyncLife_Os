@@ -174,7 +174,17 @@ async function obtenerClima(ciudad = "Cusco") {
   }
 
   try {
-    const result = await Promise.any([consultarOpenMeteo(city), consultarWttr(city)]);
+    let result;
+    try {
+      result = await consultarOpenMeteo(city);
+    } catch (openMeteoError) {
+      try {
+        result = await consultarWttr(city);
+        console.warn('Open-Meteo no está disponible; se usará wttr.in:', openMeteoError.message);
+      } catch (fallbackError) {
+        throw new AggregateError([openMeteoError, fallbackError], 'No hay proveedores del clima disponibles.');
+      }
+    }
     result.updatedAt = new Date().toISOString();
     result.stale = false;
     serviceCache.set(cacheKey, { data: result, cachedAt: Date.now() });
