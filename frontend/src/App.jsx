@@ -35,6 +35,31 @@ const apiUrl = (path) => {
 };
 
 const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+function normalizeGeneratedWorkouts(workouts) {
+  if (!workouts || typeof workouts !== 'object') return null;
+  const normalizePlan = (plan) => {
+    if (!Array.isArray(plan) || plan.length !== weekdays.length) return null;
+    const normalized = plan.map((day, index) => {
+      if (!day || day.day !== weekdays[index] || !Array.isArray(day.activities)
+        || !day.activities.every((activity) => typeof activity === 'string')
+        || !Number.isFinite(Number(day.duration)) || Number(day.duration) < 0 || Number(day.duration) > 180) {
+        return null;
+      }
+      return { ...day, activities: day.activities, duration: Number(day.duration) };
+    });
+    return normalized.every(Boolean) ? normalized : null;
+  };
+  const casa = normalizePlan(workouts.casa || workouts.home);
+  const gimnasio = normalizePlan(workouts.gimnasio || workouts.gym);
+  if (!casa || !gimnasio) return null;
+  return {
+    ...workouts,
+    casa,
+    gimnasio,
+    intensity: typeof workouts.intensity === 'string' ? workouts.intensity : 'Intensidad gradual',
+  };
+}
+
 const expenseCategories = ['Alimentación', 'Transporte', 'Ropa', 'Medicamentos', 'Hogar', 'Ocio', 'Otros'];
 const expenseCategoryIcons = {
   Alimentación: Coffee,
@@ -353,7 +378,9 @@ export default function App() {
     const savedMeals = readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.mealPlans, []);
     return Array.isArray(savedMeals) ? savedMeals.filter((meal) => !meal.generatedRecommendation) : [];
   });
-  const [generatedWorkouts, setGeneratedWorkouts] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.generatedWorkouts, null));
+  const [generatedWorkouts, setGeneratedWorkouts] = useState(() => normalizeGeneratedWorkouts(
+    readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.generatedWorkouts, null),
+  ));
   const [newHabitName, setNewHabitName] = useState('');
   const [newHabitDetail, setNewHabitDetail] = useState('');
   const [editingHabitId, setEditingHabitId] = useState(null);
@@ -633,7 +660,7 @@ export default function App() {
     setWorkoutPreference(readUserStored(name, STORAGE_KEYS.workoutPreference, 'casa'));
     const savedMeals = readUserStored(name, STORAGE_KEYS.mealPlans, []);
     setMealPlans(Array.isArray(savedMeals) ? savedMeals.filter((meal) => !meal.generatedRecommendation) : []);
-    setGeneratedWorkouts(readUserStored(name, STORAGE_KEYS.generatedWorkouts, null));
+    setGeneratedWorkouts(normalizeGeneratedWorkouts(readUserStored(name, STORAGE_KEYS.generatedWorkouts, null)));
     setHabitDate(readUserStored(name, STORAGE_KEYS.habitDate, localDate()));
     setNotifiedEvents(readUserStored(name, STORAGE_KEYS.notifiedEvents, []));
     setExpenses(readUserStored(name, STORAGE_KEYS.expenses, []));
@@ -879,12 +906,12 @@ export default function App() {
       ],
       duration: index === 6 ? 0 : lowImpact ? 20 : 30,
     }));
-    setGeneratedWorkouts({
-      home,
-      gym,
+    setGeneratedWorkouts(normalizeGeneratedWorkouts({
+      casa: home,
+      gimnasio: gym,
       intensity: lowImpact ? 'Bajo impacto y progresión gradual' : 'Intensidad moderada y progresiva',
       bmiContext: bmi >= 30 || bmi < 18.5,
-    });
+    }));
   };
 
   const generatePersonalizedWorkouts = async () => {
@@ -906,7 +933,9 @@ export default function App() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'La IA no pudo crear la rutina.');
-      setGeneratedWorkouts(result);
+      const normalizedWorkouts = normalizeGeneratedWorkouts(result);
+      if (!normalizedWorkouts) throw new Error('La rutina recibida no tiene un formato válido. Se mostrará una rutina de ejemplo.');
+      setGeneratedWorkouts(normalizedWorkouts);
       setWorkoutRecommendationMessage(`Rutina semanal personalizada generada con ${result.provider || 'IA'} para casa y gimnasio.`);
     } catch (error) {
       console.error('No se pudo generar la rutina con IA:', error);
