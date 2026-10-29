@@ -26,6 +26,9 @@ const STORAGE_KEYS = {
   generatedWorkouts: 'synclife-generated-workouts',
 };
 
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+const apiUrl = (path) => `${API_BASE_URL}${path}`;
+
 const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 const expenseCategories = ['Alimentación', 'Transporte', 'Ropa', 'Medicamentos', 'Hogar', 'Ocio', 'Otros'];
 const expenseCategoryIcons = {
@@ -290,6 +293,24 @@ function TrendChart({ records }) {
   );
 }
 
+function weatherDetails(weather) {
+  if (!weather) return '';
+  const details = [];
+  if (weather.descripcion && weather.descripcion !== 'Sin descripción') details.push(weather.descripcion);
+  if (Number.isFinite(weather.viento)) {
+    details.push(`Viento ${weather.viento} ${weather.unidades?.viento || 'km/h'}`);
+  }
+  return details.join(' · ');
+}
+
+function weatherSummary(weather, error, loading) {
+  if (error || weather?.warning) return error || weather.warning;
+  return [
+    weatherDetails(weather),
+    weather?.source || (loading ? 'Consultando proveedores del clima' : 'Sin dato actual'),
+  ].filter(Boolean).join(' · ');
+}
+
 export default function App() {
   const [vista, setVista] = useState('inicio');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -490,7 +511,7 @@ export default function App() {
       setWeatherLoading(true);
       setWeatherError('');
       try {
-        const response = await fetch(`/api/synclife/weather?city=${encodeURIComponent(ciudad.trim())}`, { signal: controller.signal });
+        const response = await fetch(apiUrl(`/api/synclife/weather?city=${encodeURIComponent(ciudad.trim())}`), { signal: controller.signal });
         const responseText = await response.text();
         let result;
         try {
@@ -758,7 +779,7 @@ export default function App() {
     setIsEstimatingMealNutrition(true);
     setMealNutritionError('');
     try {
-      const response = await fetch('/api/synclife/ai/nutrition-estimate', {
+      const response = await fetch(apiUrl('/api/synclife/ai/nutrition-estimate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ food: mealName.trim(), portion: mealPortion.trim(), mealType }),
@@ -871,7 +892,7 @@ export default function App() {
     setIsGeneratingWorkout(true);
     setWorkoutRecommendationMessage('');
     try {
-      const response = await fetch('/api/synclife/ai/workout-plan', {
+      const response = await fetch(apiUrl('/api/synclife/ai/workout-plan'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile: bodyProfile, preference: workoutPreference }),
@@ -910,7 +931,7 @@ export default function App() {
     };
 
     try {
-      const response = await fetch('/api/synclife/sync', {
+      const response = await fetch(apiUrl('/api/synclife/sync'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1418,7 +1439,7 @@ export default function App() {
                 <div className="metric-top"><span className="metric-icon amber"><CloudSun size={18} /></span><span className="metric-note">CLIMA LOCAL</span><button type="button" className="weather-refresh" onClick={() => setWeatherRefresh((current) => current + 1)} disabled={weatherLoading} aria-label="Actualizar clima" title="Actualizar clima"><RefreshCw size={14} /></button></div>
                 <span className="metric-label">{weatherApi?.ciudad || dataApi?.clima?.ciudad || ciudad}</span>
                 <div className="metric-val">{(weatherApi || dataApi?.clima)?.temp == null ? '—' : `${(weatherApi || dataApi.clima).temp}°`}<small>{(weatherApi || dataApi?.clima)?.temp == null ? (weatherLoading ? 'Consultando' : '') : 'C'}</small></div>
-                <span className="metric-foot">{weatherError || (weatherApi || dataApi?.clima)?.warning || (weatherApi || dataApi?.clima)?.source || (weatherLoading ? 'Consultando proveedores del clima' : 'Sin dato actual')}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span>
+                <span className="metric-foot">{weatherSummary(weatherApi || dataApi?.clima, weatherError, weatherLoading)}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span>
               </article>
             </section>
 
@@ -1622,7 +1643,7 @@ export default function App() {
                 </div>
                 <div className="day-weather">
                   <CloudSun size={20} />
-                  <div><strong>{(weatherApi || dataApi?.clima) ? `${(weatherApi || dataApi.clima).temp == null ? '—' : `${(weatherApi || dataApi.clima).temp}°C`} · ${(weatherApi || dataApi.clima).ciudad}` : `Clima de ${ciudad}`}</strong><span>{weatherError || (weatherApi || dataApi?.clima)?.warning || (weatherApi || dataApi?.clima)?.source || (weatherLoading ? 'Consultando proveedores del clima' : 'Sin dato actual')}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span></div>
+                  <div><strong>{(weatherApi || dataApi?.clima) ? `${(weatherApi || dataApi.clima).temp == null ? '—' : `${(weatherApi || dataApi.clima).temp}°C`} · ${(weatherApi || dataApi.clima).ciudad}` : `Clima de ${ciudad}`}</strong><span>{weatherSummary(weatherApi || dataApi?.clima, weatherError, weatherLoading)}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span></div>
                   <button type="button" className="weather-refresh" onClick={() => setWeatherRefresh((current) => current + 1)} disabled={weatherLoading} aria-label="Actualizar clima" title="Actualizar clima"><RefreshCw size={14} /></button>
                 </div>
                 <div className="timeline-list">
@@ -2033,7 +2054,7 @@ export default function App() {
                 <div className="metric-card-grid analysis-metrics">
                   <article className="metric-box"><span className="metric-label">Puntaje de hoy</span><div className="metric-val">{dataApi.diagnostico.score}<small>/ 100</small></div><span className="metric-foot">Rendimiento personal estimado</span></article>
                   <article className="metric-box"><span className="metric-label">Gasto convertido</span><div className="metric-val metric-money">{currency(dataApi.finanzas.gastoPEN)}</div><span className="metric-foot">{Number(gastoUSD) || 0} USD · {dataApi.finanzas.source || 'tipo de cambio no identificado'}{dataApi.finanzas.stale ? ' (dato de respaldo)' : ''}</span></article>
-                  <article className="metric-box"><span className="metric-label">Clima en {dataApi.clima.ciudad}</span><div className="metric-val">{dataApi.clima.temp == null ? '—' : `${dataApi.clima.temp}°`}<small>{dataApi.clima.temp == null ? '' : 'C'}</small></div><span className="metric-foot">{dataApi.clima.source || 'Fuente no identificada'}{dataApi.clima.stale ? ' (dato de respaldo)' : ''}</span></article>
+                  <article className="metric-box"><span className="metric-label">Clima en {dataApi.clima.ciudad}</span><div className="metric-val">{dataApi.clima.temp == null ? '—' : `${dataApi.clima.temp}°`}<small>{dataApi.clima.temp == null ? '' : 'C'}</small></div><span className="metric-foot">{[weatherDetails(dataApi.clima), dataApi.clima.source || 'Fuente no identificada'].filter(Boolean).join(' · ')}{dataApi.clima.stale ? ' (dato de respaldo)' : ''}</span></article>
                 </div>
                 <div className="analysis-grid">
                   <article className="card analysis-chart-card"><div className="section-heading"><div><span className="section-kicker">HISTORIAL GUARDADO</span><h2><Activity size={19} /> Evolución del rendimiento</h2></div></div><BarChart records={history.slice(-7)} /></article>
