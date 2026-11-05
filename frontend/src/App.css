@@ -68,9 +68,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .sidebar-card small { color: #504841; font-size: 10px; }
 .sidebar-bottom { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; padding: 15px 5px 1px; border-top: 1px solid #e5dad0; }
 .avatar { position: relative; display: grid; width: 33px; height: 33px; flex: 0 0 auto; place-items: center; border: 1px solid rgba(85,107,47,0.3); border-radius: 50%; color: var(--blue); background: #ebe4db; font-weight: 700; }
+.avatar img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
 .sidebar-bottom strong, .sidebar-bottom span { display: block; }
+.sidebar-bottom > div:nth-child(2) { min-width: 0; flex: 1; }
 .sidebar-bottom strong { font-size: 11px; }
-.sidebar-bottom div:nth-child(2) span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.sidebar-bottom div:nth-child(2) span { overflow: hidden; margin-top: 3px; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .online-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--green); box-shadow: 0 0 9px rgba(138,155,99,0.42); }
 
 .main-content { min-height: 100vh; margin-left: 248px; padding: 34px clamp(22px, 4vw, 58px) 22px; }
@@ -524,11 +526,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .login-icon-finance { right: 20%; bottom: 19%; transform: rotate(-8deg); }
 .login-card h1 { margin: 8px 0 6px; color: #193f30; font-size: 24px; letter-spacing: -.6px; }
 .login-card p { margin: 0 0 19px; color: #625d50; font-size: 12px; line-height: 1.6; }
-.login-field { margin-bottom: 7px; color: #28533e; font-size: 10px; font-weight: 700; }
-.login-card input { width: 100%; height: 43px; padding: 0 12px; border: 1px solid #d1c4a8; border-radius: 9px; color: var(--text); background: #fffdf7; font-size: 12px; }
-.login-card input:focus { border-color: #527451; outline-color: rgba(39, 83, 62, .28); }
 .login-submit { display: inline-flex; width: 100%; height: 43px; align-items: center; justify-content: center; gap: 5px; margin-top: 13px; border: 0; border-radius: 9px; color: #fffdf7; background: linear-gradient(105deg, #2c6348, #173f30); cursor: pointer; font-size: 12px; font-weight: 700; transition: background .18s ease, transform .18s ease; }
-.login-submit:hover { transform: translateY(-1px); background: linear-gradient(105deg, #347353, #1c4936); }
+.login-submit:hover:not(:disabled) { transform: translateY(-1px); background: linear-gradient(105deg, #347353, #1c4936); }
+.login-submit:disabled { opacity: .6; cursor: not-allowed; }
+.google-login-button { position: relative; border: 1px solid #d4d8d5; color: #28332d; background: #fff; box-shadow: 0 2px 6px rgba(25, 63, 48, .08); }
+.google-login-button:hover:not(:disabled) { border-color: #aab8ae; color: #193f30; background: #fff; }
+.google-mark { position: absolute; left: 15px; color: #4285f4; font: 800 17px Arial, sans-serif; }
+.login-auth-status, .login-card .login-auth-error { width: 100%; margin: 0 0 10px; padding: 10px; border-radius: 7px; font-size: 10px; line-height: 1.5; }
+.login-auth-status { color: #385945; background: rgba(39, 83, 62, .08); }
+.login-card .login-auth-error { border: 1px solid rgba(165, 95, 83, .25); color: #8e3f36; background: rgba(165, 95, 83, .08); }
 .login-card > small { margin-top: 13px; color: #71685c; font-size: 9px; line-height: 1.5; }
 .opening-curtain { position: fixed; z-index: 100; inset: 0; display: flex; overflow: hidden; pointer-events: none; background: #193f30; }
 .opening-curtain::before { position: absolute; z-index: 3; inset: -60%; background: conic-gradient(from 0deg at 50% 50%, rgba(225, 211, 178, .03) 0deg, rgba(39, 83, 62, .64) 52deg, rgba(122, 151, 106, .42) 118deg, rgba(25, 63, 47, .78) 188deg, rgba(225, 211, 178, .24) 248deg, rgba(39, 83, 62, .75) 310deg, rgba(225, 211, 178, .03) 360deg); filter: blur(20px); animation: vortex-spin 4s cubic-bezier(.65, 0, .25, 1) forwards; content: ''; }
@@ -688,6 +694,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .meal-nutrition-details summary::after { margin-left: auto; content: '+'; font-size: 16px; }
 .meal-nutrition-details[open] summary::after { content: '−'; }
 .meal-nutrition-details > p { margin: 8px 0 11px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.nutrition-facts { width: min(100%, 520px); margin: 10px 0; overflow: hidden; border: 1px solid rgba(39,83,62,.12); border-radius: 7px; background: rgba(255,255,255,.62); }
+.nutrition-facts h4 { margin: 0; padding: 7px 9px; color: var(--olive); background: rgba(39,83,62,.08); font-size: 9px; font-weight: 700; }
+.nutrition-facts-table { width: 100%; border-collapse: collapse; color: var(--text); font-size: 9px; text-align: left; }
+.nutrition-facts-table th, .nutrition-facts-table td { padding: 5px 9px; border-bottom: 1px solid rgba(39,83,62,.1); }
+.nutrition-facts-table thead th { color: var(--muted); font-size: 8px; font-weight: 600; }
+.nutrition-facts-table tbody th { width: 50%; font-weight: 600; }
+.nutrition-facts-table tbody tr:last-child th, .nutrition-facts-table tbody tr:last-child td { border-bottom: 0; }
+.nutrition-facts-table td { overflow-wrap: anywhere; }
 .estimate-nutrients-button { display: inline-flex; min-height: 35px; align-items: center; gap: 7px; padding: 0 11px; border: 1px solid rgba(39,83,62,.18); border-radius: 7px; color: #fff; background: var(--olive); cursor: pointer; font-size: 9px; font-weight: 650; }
 .estimate-nutrients-button:hover:not(:disabled) { background: var(--terracotta-dark); }
 .estimate-nutrients-button:disabled { opacity: .58; cursor: not-allowed; }
@@ -788,6 +802,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .preference-row > div { width: 100%; }
   .preference-button { flex: 1; justify-content: center; }
   .meal-entry-form, .fixed-cost-form { grid-template-columns: 1fr; }
+  .meal-entry-form { padding: 11px; }
   .micronutrient-category-grid { grid-template-columns: 1fr; }
   .meal-nutrient-fields { grid-template-columns: 1fr; }
   .meal-nutrient-fields .field-wide { grid-column: auto; }

@@ -12,6 +12,12 @@ npm ci --prefix frontend
 
 Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el puerto `3002` para evitar conflictos con servicios que ya ocupen los puertos `3000` o `3001`; el frontend de Vite envía `/api` al backend en `127.0.0.1:3002`. En producción, el backend respeta el puerto asignado por la plataforma mediante `PORT`.
 
+## Inicio de sesión con Google
+
+La autenticación usa Firebase Authentication. En Firebase Console, crea una aplicación web y habilita **Authentication → Sign-in method → Google**. Copia la configuración web a `frontend/.env.local` usando las variables de `frontend/.env.example`, y agrega `localhost` y el dominio de producción en **Authentication → Settings → Authorized domains**. El primer inicio con Google crea automáticamente la cuenta si aún no existe.
+
+En Vercel, configura esas mismas cuatro variables `VITE_FIREBASE_*` para Production y vuelve a desplegar. La autenticación es real, pero los datos de SyncLife actualmente se guardan en el navegador, separados por UID de Firebase; no se sincronizan entre dispositivos ni se almacenan en Firebase.
+
 ## Despliegue: backend en Render y frontend en Vercel
 
 El servicio existente `SyncLife_Os` en Render debe usar la raíz `backend`, el comando de build `npm ci && npm rebuild sqlite3 --build-from-source` y el comando de inicio `npm start`. La recompilación evita reutilizar un binario de `sqlite3` que requiere una versión de glibc distinta. Render define `PORT` automáticamente; `3002` es solo el valor predeterminado local. Comprueba disponibilidad en `/api/health`.

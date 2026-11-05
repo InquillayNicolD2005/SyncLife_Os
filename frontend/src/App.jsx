@@ -7,6 +7,8 @@ import {
   Shirt, Pill, ShoppingBag, Coffee, RefreshCw,
 } from 'lucide-react';
 import jsPDF from 'jspdf';
+import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth';
+import { auth, firebaseConfigured } from './firebase';
 import './App.css';
 
 const STORAGE_KEYS = {
@@ -220,22 +222,26 @@ function readStored(key, fallback) {
   }
 }
 
-function userStorageKey(name, key) {
-  const normalizedName = String(name || '').trim().toLocaleLowerCase('es');
-  return `synclife-user:${encodeURIComponent(normalizedName)}:${key}`;
+function userStorageKey(userId, key) {
+  const normalizedId = String(userId || '').trim().toLocaleLowerCase('es');
+  return `synclife-user:${encodeURIComponent(normalizedId)}:${key}`;
 }
 
-function readUserStored(name, key, fallback) {
+function readUserStored(userId, key, fallback, legacyName = '') {
   try {
-    const scopedValue = window.localStorage.getItem(userStorageKey(name, key));
+    const scopedValue = window.localStorage.getItem(userStorageKey(userId, key));
     if (scopedValue !== null) return JSON.parse(scopedValue);
-    const lastProfile = readStored(STORAGE_KEYS.profile, { name: 'Nicol' });
-    if (String(lastProfile.name || '').trim().toLocaleLowerCase('es') === String(name || '').trim().toLocaleLowerCase('es')) {
-      return readStored(key, fallback);
+    if (legacyName) {
+      const lastProfile = readStored(STORAGE_KEYS.profile, {});
+      if (String(lastProfile.name || '').trim().toLocaleLowerCase('es') === legacyName.trim().toLocaleLowerCase('es')) {
+        const legacyScopedValue = window.localStorage.getItem(userStorageKey(legacyName, key));
+        if (legacyScopedValue !== null) return JSON.parse(legacyScopedValue);
+        return readStored(key, fallback);
+      }
     }
     return fallback;
   } catch (error) {
-    console.error(`No se pudo leer ${key} para el perfil ${name}:`, error);
+    console.error(`No se pudo leer ${key} para la cuenta ${userId}:`, error);
     return fallback;
   }
 }
@@ -344,7 +350,9 @@ function weatherSummary(weather, error, loading) {
 export default function App() {
   const [vista, setVista] = useState('inicio');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loginName, setLoginName] = useState('');
+  const [authReady, setAuthReady] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [showCurtain, setShowCurtain] = useState(false);
   const [profile, setProfile] = useState(() => readStored(STORAGE_KEYS.profile, { name: 'Nicol', onboarded: false }));
   const [tourStep, setTourStep] = useState(() => {
@@ -397,6 +405,10 @@ export default function App() {
   const [mealSodium, setMealSodium] = useState('');
   const [mealAddedSugar, setMealAddedSugar] = useState('');
   const [mealMicronutrients, setMealMicronutrients] = useState('');
+  const [mealEnergy, setMealEnergy] = useState('');
+  const [mealProtein, setMealProtein] = useState('');
+  const [mealCarbohydrates, setMealCarbohydrates] = useState('');
+  const [mealFat, setMealFat] = useState('');
   const [mealPortion, setMealPortion] = useState('');
   const [mealNutritionEstimate, setMealNutritionEstimate] = useState(null);
   const [mealNutritionError, setMealNutritionError] = useState('');
@@ -494,6 +506,7 @@ export default function App() {
         : '¡Buen avance! Hoy completaste tus hábitos. Puedes cerrar el día con una nota en tu registro.';
 
   useEffect(() => {
+    if (!profile.accountId) return;
     const saved = [
       [STORAGE_KEYS.habits, habits],
       [STORAGE_KEYS.events, events],
@@ -511,15 +524,15 @@ export default function App() {
     ];
     saved.forEach(([key, value]) => {
       try {
-        window.localStorage.setItem(userStorageKey(profile.name, key), JSON.stringify(value));
+        window.localStorage.setItem(userStorageKey(profile.accountId, key), JSON.stringify(value));
       } catch (error) {
-        console.error(`No se pudo guardar ${key} para el perfil ${profile.name}:`, error);
+        console.error(`No se pudo guardar ${key} para la cuenta ${profile.accountId}:`, error);
       }
     });
     try {
-      window.localStorage.setItem(STORAGE_KEYS.profile, JSON.stringify(profile));
+      window.localStorage.setItem(userStorageKey(profile.accountId, STORAGE_KEYS.profile), JSON.stringify(profile));
     } catch (error) {
-      console.error('No se pudo guardar el último perfil en el almacenamiento local:', error);
+      console.error('No se pudo guardar el perfil de la cuenta en el almacenamiento local:', error);
     }
   }, [habits, events, history, ingreso, fixedCosts, foodBudget, bodyProfile, workoutPreference, mealPlans, profile, notifiedEvents, expenses, habitDate, generatedWorkouts]);
 
@@ -634,36 +647,40 @@ export default function App() {
 
   const finishTour = () => {
     const name = profile.name.trim() || 'Nicol';
-    setProfile({ name, onboarded: true });
+    setProfile((current) => ({ ...current, name, onboarded: true }));
     setTourStep(-1);
   };
 
-  const enterWorkspace = (event) => {
-    event.preventDefault();
-    const name = loginName.trim() || profile.name || 'Nicol';
-    const userProfile = readUserStored(name, STORAGE_KEYS.profile, { name, onboarded: false });
-    const savedHabits = readUserStored(name, STORAGE_KEYS.habits, []);
-    const savedBudget = readUserStored(name, STORAGE_KEYS.foodBudget, 0);
-    setProfile({ ...userProfile, name });
+  const enterWorkspace = (user) => {
+    const accountId = user.uid;
+    const name = readUserStored(accountId, STORAGE_KEYS.profile, null, user.displayName || '')?.name
+      || user.displayName?.trim()
+      || user.email?.split('@')[0]
+      || 'Usuario';
+    const readAccountData = (key, fallback) => readUserStored(accountId, key, fallback, user.displayName || '');
+    const userProfile = readAccountData(STORAGE_KEYS.profile, { name, onboarded: false });
+    const savedHabits = readAccountData(STORAGE_KEYS.habits, []);
+    const savedBudget = readAccountData(STORAGE_KEYS.foodBudget, 0);
+    setProfile({ ...userProfile, name, accountId, email: user.email || '', photoURL: user.photoURL || '' });
     setTourStep(userProfile.onboarded ? -1 : 0);
     setHabits(Array.isArray(savedHabits) ? savedHabits : []);
-    setEvents(readUserStored(name, STORAGE_KEYS.events, []));
-    setHistory(readUserStored(name, STORAGE_KEYS.history, []));
-    setIngreso(readUserStored(name, STORAGE_KEYS.income, 0));
-    setFixedCosts(readUserStored(name, STORAGE_KEYS.fixedCosts, []));
+    setEvents(readAccountData(STORAGE_KEYS.events, []));
+    setHistory(readAccountData(STORAGE_KEYS.history, []));
+    setIngreso(readAccountData(STORAGE_KEYS.income, 0));
+    setFixedCosts(readAccountData(STORAGE_KEYS.fixedCosts, []));
     setFoodBudget(savedBudget);
-    const savedBodyProfile = readUserStored(name, STORAGE_KEYS.bodyProfile, { weight: '', height: '', sex: '', age: '' });
+    const savedBodyProfile = readAccountData(STORAGE_KEYS.bodyProfile, { weight: '', height: '', sex: '', age: '' });
     setBodyProfile({
       ...savedBodyProfile,
       sex: savedBodyProfile.sex === 'mujer' ? 'femenino' : savedBodyProfile.sex === 'hombre' ? 'masculino' : savedBodyProfile.sex,
     });
-    setWorkoutPreference(readUserStored(name, STORAGE_KEYS.workoutPreference, 'casa'));
-    const savedMeals = readUserStored(name, STORAGE_KEYS.mealPlans, []);
+    setWorkoutPreference(readAccountData(STORAGE_KEYS.workoutPreference, 'casa'));
+    const savedMeals = readAccountData(STORAGE_KEYS.mealPlans, []);
     setMealPlans(Array.isArray(savedMeals) ? savedMeals.filter((meal) => !meal.generatedRecommendation) : []);
-    setGeneratedWorkouts(normalizeGeneratedWorkouts(readUserStored(name, STORAGE_KEYS.generatedWorkouts, null)));
-    setHabitDate(readUserStored(name, STORAGE_KEYS.habitDate, localDate()));
-    setNotifiedEvents(readUserStored(name, STORAGE_KEYS.notifiedEvents, []));
-    setExpenses(readUserStored(name, STORAGE_KEYS.expenses, []));
+    setGeneratedWorkouts(normalizeGeneratedWorkouts(readAccountData(STORAGE_KEYS.generatedWorkouts, null)));
+    setHabitDate(readAccountData(STORAGE_KEYS.habitDate, localDate()));
+    setNotifiedEvents(readAccountData(STORAGE_KEYS.notifiedEvents, []));
+    setExpenses(readAccountData(STORAGE_KEYS.expenses, []));
     setActividad('Desarrollo de plataformas web');
     setHoras(4);
     setAnimo(8);
@@ -686,6 +703,16 @@ export default function App() {
     setMealName('');
     setMealCost('');
     setMealDate(localDate());
+    setMealFiber('');
+    setMealSodium('');
+    setMealAddedSugar('');
+    setMealMicronutrients('');
+    setMealEnergy('');
+    setMealProtein('');
+    setMealCarbohydrates('');
+    setMealFat('');
+    setMealNutritionEstimate(null);
+    setMealNutritionError('');
     setEventoNombre('');
     setEventoFecha(localDate());
     setEventMode('horas');
@@ -707,12 +734,70 @@ export default function App() {
     setShowCurtain(true);
   };
 
-  const switchUser = () => {
-    setIsLoggedIn(false);
-    setShowCurtain(false);
-    setLoginName('');
-    setNotificationsOpen(false);
-    setTourStep(-1);
+  useEffect(() => {
+    if (!auth) {
+      setAuthReady(true);
+      return undefined;
+    }
+    getRedirectResult(auth).catch((error) => {
+      console.error('No se pudo completar el acceso redirigido de Google:', error);
+      setAuthError('No se pudo completar el acceso con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
+    });
+    return onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setAuthError('');
+        enterWorkspace(user);
+      } else {
+        setIsLoggedIn(false);
+        setShowCurtain(false);
+        setNotificationsOpen(false);
+        setTourStep(-1);
+      }
+      setAuthReady(true);
+    }, (error) => {
+      console.error('No se pudo comprobar la sesión de Firebase:', error);
+      setAuthError('No se pudo comprobar la sesión de Google. Vuelve a intentarlo.');
+      setAuthReady(true);
+    });
+  }, []);
+
+  const signInWithGoogle = async () => {
+    if (!auth) {
+      setAuthError('Configura Firebase en frontend/.env.local para habilitar el acceso con Google.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const provider = new GoogleAuthProvider();
+      if (window.matchMedia('(max-width: 760px)').matches) {
+        await signInWithRedirect(auth, provider);
+      } else {
+        await signInWithPopup(auth, provider);
+      }
+    } catch (error) {
+      console.error('No se pudo iniciar sesión con Google:', error);
+      setAuthError(error.code === 'auth/popup-closed-by-user'
+        ? 'Se cerró la ventana de Google antes de completar el acceso.'
+        : error.code === 'auth/unauthorized-domain'
+          ? 'Este dominio no está autorizado en Firebase Authentication.'
+          : error.code === 'auth/popup-blocked'
+            ? 'El navegador bloqueó la ventana de Google. Permite las ventanas emergentes e inténtalo otra vez.'
+            : 'No se pudo iniciar sesión con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const switchUser = async () => {
+    if (!auth) return;
+    setAuthError('');
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error('No se pudo cerrar la sesión de Google:', error);
+      setAuthError('No se pudo cerrar la sesión. Inténtalo otra vez.');
+    }
   };
 
   const toggleHabit = (id) => {
@@ -796,6 +881,10 @@ export default function App() {
   const clearMealNutritionEstimate = () => {
     setMealNutritionEstimate(null);
     setMealNutritionError('');
+    setMealEnergy('');
+    setMealProtein('');
+    setMealCarbohydrates('');
+    setMealFat('');
     setMealFiber('');
     setMealSodium('');
     setMealAddedSugar('');
@@ -829,6 +918,10 @@ export default function App() {
       setMealSodium(result.sodiumMg == null ? '' : String(result.sodiumMg));
       setMealAddedSugar(result.addedSugarG == null ? '' : String(result.addedSugarG));
       setMealMicronutrients(result.micronutrients || '');
+      setMealEnergy(result.energyKcal == null ? '' : String(result.energyKcal));
+      setMealProtein(result.proteinG == null ? '' : String(result.proteinG));
+      setMealCarbohydrates(result.carbohydratesG == null ? '' : String(result.carbohydratesG));
+      setMealFat(result.fatG == null ? '' : String(result.fatG));
       setMealNutritionEstimate({
         source: result.source,
         estimatedAt: result.estimatedAt,
@@ -848,10 +941,15 @@ export default function App() {
     const cost = Number(mealCost);
     if (!mealName.trim() || !Number.isFinite(cost) || cost < 0 || !mealDate) return;
     const optionalAmount = (value) => value === '' ? null : Number(value);
+    const energy = optionalAmount(mealEnergy);
+    const protein = optionalAmount(mealProtein);
+    const carbohydrates = optionalAmount(mealCarbohydrates);
+    const fat = optionalAmount(mealFat);
     const fiber = optionalAmount(mealFiber);
     const sodium = optionalAmount(mealSodium);
     const addedSugar = optionalAmount(mealAddedSugar);
-    if ([fiber, sodium, addedSugar].some((value) => value !== null && (!Number.isFinite(value) || value < 0))) return;
+    if ([energy, protein, carbohydrates, fat, fiber, sodium, addedSugar]
+      .some((value) => value !== null && (!Number.isFinite(value) || value < 0))) return;
     setMealPlans((current) => [...current, {
       id: `${Date.now()}`,
       type: mealType,
@@ -859,6 +957,10 @@ export default function App() {
       cost,
       date: mealDate,
       nutrition: {
+        energyKcal: energy,
+        proteinG: protein,
+        carbohydratesG: carbohydrates,
+        fatG: fat,
         fiberG: fiber,
         sodiumMg: sodium,
         addedSugarG: addedSugar,
@@ -873,6 +975,10 @@ export default function App() {
     setNotification(`${mealTypeLabels[mealType] || mealType} añadido a tu plan para el ${dateLabel(new Date(`${mealDate}T12:00:00`), { day: 'numeric', month: 'long' })}.`);
     setMealName('');
     setMealCost('');
+    setMealEnergy('');
+    setMealProtein('');
+    setMealCarbohydrates('');
+    setMealFat('');
     setMealFiber('');
     setMealSodium('');
     setMealAddedSugar('');
@@ -1243,6 +1349,10 @@ export default function App() {
     type,
     meals: mealsToday.filter((item) => item.type === type).map((item) => {
       const nutrientFields = [
+        { key: 'energyKcal', label: 'Energía', unit: 'kcal' },
+        { key: 'proteinG', label: 'Proteínas', unit: 'g' },
+        { key: 'carbohydratesG', label: 'Carbohidratos', unit: 'g' },
+        { key: 'fatG', label: 'Grasas', unit: 'g' },
         { key: 'fiberG', label: 'Fibra', unit: 'g' },
         { key: 'sodiumMg', label: 'Sodio', unit: 'mg' },
         { key: 'addedSugarG', label: 'Azúcares añadidos', unit: 'g' },
@@ -1274,7 +1384,7 @@ export default function App() {
     { id: 'analisis', label: 'Análisis', icon: BarChart3 },
   ];
   const tourSteps = [
-    { title: `¡Hola, ${profile.name || 'Nicol'}!`, text: 'Este es tu espacio personal. El nombre se guarda solo en este navegador; no es una cuenta ni una contraseña.' },
+    { title: `¡Hola, ${profile.name || 'Nicol'}!`, text: 'Este es tu espacio personal. Tu sesión se inicia con Google y tus datos se guardan por cuenta en este navegador.' },
     { title: 'Tu panel de un vistazo', text: 'Desde el inicio puedes entrar al calendario, bienestar y finanzas; también verás un resumen del día.' },
     { title: 'Registra ejercicio y enfoque', text: 'En Registro diario anota qué actividad hiciste, cuántos minutos, la intensidad y cómo sentiste tu productividad.' },
     { title: 'Eventos y recordatorios', text: 'Añade un evento con hora. Si permites las notificaciones, recibirás un aviso personalizado mientras la página esté abierta.' },
@@ -1300,7 +1410,7 @@ export default function App() {
         <div className="login-icon login-icon-activity"><Activity /></div>
         <div className="login-icon login-icon-food"><Salad /></div>
         <div className="login-icon login-icon-finance"><Wallet /></div>
-        <form className="login-card" onSubmit={enterWorkspace}>
+        <section className="login-card" aria-labelledby="login-title">
           <img className="login-logo" src="/synclife-logo.png" alt="Logo de SyncLife OS" />
           <div className="login-icon-row" aria-hidden="true">
             {[CalendarDays, Activity, Salad, Wallet].map((Icon, index) => (
@@ -1308,13 +1418,17 @@ export default function App() {
             ))}
           </div>
           <span className="section-kicker">TU ESPACIO PERSONAL</span>
-          <h1>Bienvenido a SyncLife</h1>
+          <h1 id="login-title">Bienvenido a SyncLife</h1>
           <p>Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.</p>
-          <label className="login-field" htmlFor="login-name">¿Cómo te llamamos?</label>
-          <input id="login-name" maxLength={40} autoComplete="name" value={loginName} onChange={(event) => setLoginName(event.target.value)} placeholder={profile.name || 'Escribe tu nombre'} />
-          <button className="login-submit" type="submit">Ingresar <ChevronRight size={17} /></button>
-          <small>Acceso personal en este dispositivo; tus datos permanecen en el navegador.</small>
-        </form>
+          {!authReady && <p className="login-auth-status" role="status">Comprobando tu sesión…</p>}
+          {authError && <p className="login-auth-error" role="alert">{authError}</p>}
+          {!firebaseConfigured && <p className="login-auth-error" role="alert">Falta configurar Firebase. Completa las variables VITE_FIREBASE_* en frontend/.env.local y reinicia Vite.</p>}
+          <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
+            <span className="google-mark" aria-hidden="true">G</span>
+            {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
+          </button>
+          <small>La primera vez que ingreses con Google se creará tu cuenta automáticamente. Tus datos de SyncLife se guardan por cuenta en este navegador.</small>
+        </section>
       </main>
     );
   }
@@ -1370,10 +1484,10 @@ export default function App() {
         </div>
 
         <div className="sidebar-bottom">
-          <div className="avatar">{profile.name.charAt(0).toUpperCase()}</div>
-          <div><strong>{profile.name}</strong><span>Plan personal</span></div>
+          <div className="avatar">{profile.photoURL ? <img src={profile.photoURL} alt="" /> : profile.name.charAt(0).toUpperCase()}</div>
+          <div><strong>{profile.name}</strong><span>{profile.email || 'Cuenta Google'}</span></div>
           <button className="profile-edit" aria-label="Repetir recorrido guiado" data-tooltip="Repetir recorrido guiado" onClick={() => setTourStep(0)}><HelpCircle size={16} /></button>
-          <button className="profile-edit" aria-label="Cambiar de usuario" data-tooltip="Cambiar de usuario" onClick={switchUser}><LogOut size={16} /></button>
+          <button className="profile-edit" aria-label="Cerrar sesión" data-tooltip="Cerrar sesión" onClick={switchUser}><LogOut size={16} /></button>
           <span className="online-dot" aria-label="En línea" />
         </div>
       </aside>
@@ -1861,7 +1975,7 @@ export default function App() {
               />
               <div className="meal-step-heading meal-entry-heading">
                 <span className="meal-step-number">2</span>
-                <div><h3>Registra tu comida</h3><p>Indica la categoría, el alimento, la porción, la fecha y el costo. Luego puedes pedirle a la IA una estimación nutricional y revisarla antes de guardar.</p></div>
+                <div><h3>Registra tu comida</h3><p>Indica la fecha, categoría, alimento, porción y costo; puedes estimar y revisar sus nutrientes antes de guardar.</p></div>
               </div>
               <form className="meal-entry-form" onSubmit={addMealPlan}>
                 <div className="field"><label htmlFor="meal-date">Fecha</label><input id="meal-date" type="date" value={mealDate} onChange={(event) => setMealDate(event.target.value)} required /></div>
@@ -1869,14 +1983,30 @@ export default function App() {
                 <div className="field"><label htmlFor="meal-name">Alimento o plato</label><input id="meal-name" value={mealName} disabled={isEstimatingMealNutrition} onChange={(event) => { if (event.target.value !== mealName) clearMealNutritionEstimate(); setMealName(event.target.value); }} placeholder="Ej. arroz, pollo y ensalada" required /></div>
                 <div className="field"><label htmlFor="meal-portion">Porción o cantidad</label><input id="meal-portion" value={mealPortion} disabled={isEstimatingMealNutrition} onChange={(event) => { if (event.target.value !== mealPortion) clearMealNutritionEstimate(); setMealPortion(event.target.value); }} placeholder="Ej. 1 plato (350 g)" /></div>
                 <div className="field"><label htmlFor="meal-cost">Costo estimado del plato (PEN)</label><input id="meal-cost" type="number" min="0" step="0.1" value={mealCost} onChange={(event) => setMealCost(event.target.value)} placeholder="0.00" required /></div>
-                <details className="meal-nutrition-details">
-                  <summary><Activity size={15} /> Estimar nutrientes con IA o ingresarlos manualmente</summary>
-                  <p>Especifica alimento e ingredientes y una porción aproximada para obtener una estimación más útil. La IA no reemplaza una etiqueta nutricional y sus resultados pueden variar.</p>
+                <details className="meal-nutrition-details" open>
+                  <summary><Activity size={15} /> Estimar nutrientes o ingresarlos manualmente</summary>
+                  <p>La estimación usa la porción indicada y referencias nutricionales aproximadas. Revisa los datos antes de guardar; pueden variar según el alimento y su preparación.</p>
                   <button className="estimate-nutrients-button" type="button" onClick={estimateMealNutrition} disabled={isEstimatingMealNutrition || !mealName.trim() || !mealPortion.trim()}>
-                    <Sparkles size={15} /> {isEstimatingMealNutrition ? 'Estimando nutrientes…' : 'Estimar con IA'}
+                    <Sparkles size={15} /> {isEstimatingMealNutrition ? 'Estimando…' : 'Estimar'}
                   </button>
                   {mealNutritionError && <p className="nutrition-estimate-message is-error" role="alert">{mealNutritionError}</p>}
-                  {mealNutritionEstimate && <div className="nutrition-estimate-message" role="status"><strong>Recomendación de {mealNutritionEstimate.source}:</strong> {mealNutritionEstimate.recommendation}<br />Estimación nutricional lista; revísala antes de guardar. Los valores que la IA no pudo estimar quedan vacíos.{mealNutritionEstimate.basis ? ` Supuesto: ${mealNutritionEstimate.basis}` : ''}</div>}
+                  {mealNutritionEstimate && <div className="nutrition-estimate-message" role="status">Estimación de {mealNutritionEstimate.source} lista. Revísala y corrige los campos antes de guardar. Los nutrientes sin datos quedan vacíos.{mealNutritionEstimate.basis ? ` Supuesto: ${mealNutritionEstimate.basis}` : ''}<br /><strong>Recomendación:</strong> {mealNutritionEstimate.recommendation}</div>}
+                  <div className="nutrition-facts">
+                    <h4>Información nutricional estimada · {mealPortion.trim() || 'por porción'}</h4>
+                    <table className="nutrition-facts-table">
+                      <thead><tr><th>Nutriente</th><th>Por porción</th></tr></thead>
+                      <tbody>
+                        <tr><th scope="row">Energía</th><td>{mealEnergy ? `${mealEnergy} kcal` : '—'}</td></tr>
+                        <tr><th scope="row">Proteínas</th><td>{mealProtein ? `${mealProtein} g` : '—'}</td></tr>
+                        <tr><th scope="row">Carbohidratos</th><td>{mealCarbohydrates ? `${mealCarbohydrates} g` : '—'}</td></tr>
+                        <tr><th scope="row">Grasas</th><td>{mealFat ? `${mealFat} g` : '—'}</td></tr>
+                        <tr><th scope="row">Fibra</th><td>{mealFiber ? `${mealFiber} g` : '—'}</td></tr>
+                        <tr><th scope="row">Sodio</th><td>{mealSodium ? `${mealSodium} mg` : '—'}</td></tr>
+                        <tr><th scope="row">Azúcares añadidos</th><td>{mealAddedSugar ? `${mealAddedSugar} g` : '—'}</td></tr>
+                        <tr><th scope="row">Vitaminas y minerales</th><td>{mealMicronutrients || '—'}</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
                   <div className="meal-nutrient-fields">
                     <div className="field"><label htmlFor="meal-fiber">Fibra (g)</label><input id="meal-fiber" type="number" min="0" step="0.1" value={mealFiber} onChange={(event) => setMealFiber(event.target.value)} placeholder="Ej. 4.5" /></div>
                     <div className="field"><label htmlFor="meal-sodium">Sodio (mg)</label><input id="meal-sodium" type="number" min="0" step="1" value={mealSodium} onChange={(event) => setMealSodium(event.target.value)} placeholder="Ej. 320" /></div>
@@ -1890,7 +2020,7 @@ export default function App() {
                 <div className="planned-meals-heading"><h3>Mi plan de comidas</h3><p>Cada plato aparece con su tipo, fecha y costo para que puedas revisar tu semana.</p></div>
                 {mealPlans.length ? mealPlans.map((item) => (
                   <div className="planned-meal" key={item.id}>
-                    <div><strong>{item.name}</strong><small><span className="planned-meal-type">{mealTypeLabels[item.type] || item.type}</span> · {dateLabel(new Date(`${item.date}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })}</small>{(item.nutrition?.fiberG != null || item.nutrition?.sodiumMg != null || item.nutrition?.addedSugarG != null || item.nutrition?.micronutrients) && <small className="planned-meal-nutrition">Nutrientes registrados: {item.nutrition.fiberG != null ? `fibra ${item.nutrition.fiberG} g` : ''}{item.nutrition.sodiumMg != null ? `${item.nutrition.fiberG != null ? ' · ' : ''}sodio ${item.nutrition.sodiumMg} mg` : ''}{item.nutrition.addedSugarG != null ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null ? ' · ' : ''}azúcares añadidos ${item.nutrition.addedSugarG} g` : ''}{item.nutrition.micronutrients ? `${item.nutrition.fiberG != null || item.nutrition.sodiumMg != null || item.nutrition.addedSugarG != null ? ' · ' : ''}${item.nutrition.micronutrients}` : ''}</small>}{item.nutrition?.recommendation && <small className="planned-meal-nutrition"><strong>Recomendación:</strong> {item.nutrition.recommendation}</small>}</div>
+                    <div><strong>{item.name}</strong><small><span className="planned-meal-type">{mealTypeLabels[item.type] || item.type}</span> · {dateLabel(new Date(`${item.date}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })}</small>{(item.nutrition?.energyKcal != null || item.nutrition?.proteinG != null || item.nutrition?.carbohydratesG != null || item.nutrition?.fatG != null || item.nutrition?.fiberG != null || item.nutrition?.sodiumMg != null || item.nutrition?.addedSugarG != null || item.nutrition?.micronutrients) && <small className="planned-meal-nutrition">Nutrientes registrados: {[[item.nutrition.energyKcal, 'energía', 'kcal'], [item.nutrition.proteinG, 'proteínas', 'g'], [item.nutrition.carbohydratesG, 'carbohidratos', 'g'], [item.nutrition.fatG, 'grasas', 'g'], [item.nutrition.fiberG, 'fibra', 'g'], [item.nutrition.sodiumMg, 'sodio', 'mg'], [item.nutrition.addedSugarG, 'azúcares añadidos', 'g']].filter(([value]) => value != null).map(([value, label, unit]) => `${label} ${value} ${unit}`).concat(item.nutrition.micronutrients || []).join(' · ')}</small>}{item.nutrition?.recommendation && <small className="planned-meal-nutrition"><strong>Recomendación:</strong> {item.nutrition.recommendation}</small>}</div>
                     <strong>{currency(item.cost)}</strong>
                     <button aria-label={`Eliminar ${item.name}`} onClick={() => setMealPlans((current) => current.filter((meal) => meal.id !== item.id))}><Trash2 size={15} /></button>
                   </div>
