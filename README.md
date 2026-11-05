@@ -14,9 +14,9 @@ Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el pu
 
 ## Inicio de sesión con Google
 
-La autenticación usa Firebase Authentication. En Firebase Console, crea una aplicación web y habilita **Authentication → Sign-in method → Google**. Copia la configuración web a `frontend/.env.local` usando las variables de `frontend/.env.example`, y agrega `localhost` y el dominio de producción en **Authentication → Settings → Authorized domains**. El primer inicio con Google crea automáticamente la cuenta si aún no existe.
+La autenticación usa Firebase Authentication. La configuración web del proyecto está incluida como valor predeterminado en el frontend; opcionalmente puede sobrescribirse con las variables de `frontend/.env.example` en `frontend/.env.local` o en Vercel. En Firebase Console, habilita **Authentication → Sign-in method → Google** y agrega `localhost` y el dominio de producción (por ejemplo, `synclifeos.vercel.app`) en **Authentication → Settings → Authorized domains**. El primer inicio con Google crea automáticamente la cuenta si aún no existe. La clave API web es pública para clientes y debe restringirse en Google Cloud a los dominios y APIs necesarios; no la uses como secreto de servidor.
 
-En Vercel, configura esas mismas cuatro variables `VITE_FIREBASE_*` para Production y vuelve a desplegar. La autenticación es real, pero los datos de SyncLife actualmente se guardan en el navegador, separados por UID de Firebase; no se sincronizan entre dispositivos ni se almacenan en Firebase.
+La autenticación es real, pero los datos de SyncLife actualmente se guardan en el navegador, separados por UID de Firebase; no se sincronizan entre dispositivos ni se almacenan en Firebase.
 
 ## Despliegue: backend en Render y frontend en Vercel
 
