@@ -167,12 +167,14 @@ router.post('/sync', async (req, res) => {
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   if (!match) return res.status(401).json({ error: 'Se requiere una sesión autenticada.' });
 
+  let syncStage = 'firebase-authentication';
   try {
     const { auth } = getAdminServices();
     const decodedToken = await auth.verifyIdToken(match[1], true);
     let user = await auth.getUser(decodedToken.uid);
     if (user.disabled) return res.status(403).json({ error: 'Esta cuenta está deshabilitada.' });
 
+    syncStage = 'firebase-admin-claim';
     if (isRootAccount(user)
       && (user.customClaims?.admin !== true || user.customClaims?.superAdmin !== true)) {
       await auth.setCustomUserClaims(user.uid, {
@@ -183,6 +185,7 @@ router.post('/sync', async (req, res) => {
       user = await auth.getUser(user.uid);
     }
 
+    syncStage = 'postgres-account-sync';
     let accountRole = await syncAccount(user);
     const claims = { ...user.customClaims };
     const shouldHaveAdminClaim = accountRole.admin;
@@ -194,7 +197,9 @@ router.post('/sync', async (req, res) => {
       if (shouldHaveSuperAdminClaim) claims.superAdmin = true;
       else delete claims.superAdmin;
       await auth.setCustomUserClaims(user.uid, claims);
+      syncStage = 'firebase-admin-claim-refresh';
       user = await auth.getUser(user.uid);
+      syncStage = 'postgres-account-sync';
       accountRole = await syncAccount(user);
     }
     return res.json({
@@ -203,7 +208,7 @@ router.post('/sync', async (req, res) => {
       superAdmin: accountRole.superAdmin && isRootAccount(user),
     });
   } catch (error) {
-    console.error('No se pudo sincronizar la cuenta con PostgreSQL:', error);
+    console.error(`No se pudo sincronizar la cuenta (etapa: ${syncStage}):`, error);
     if (error.code === 'auth/id-token-expired' || error.code === 'auth/invalid-id-token'
       || error.code === 'auth/argument-error' || error.code === 'auth/id-token-revoked') {
       return res.status(401).json({ error: 'La sesión expiró. Inicia sesión de nuevo.' });
@@ -211,11 +216,10 @@ router.post('/sync', async (req, res) => {
     if (error.code === 'auth/user-disabled' || error.code === 'auth/user-not-found') {
       return res.status(403).json({ error: 'Esta cuenta ya no puede acceder.' });
     }
-    return res.status(error.statusCode || 503).json({
-      error: error.statusCode === 503
-        ? error.message
-        : 'No se pudo guardar la cuenta en la base de datos. Revisa la conexión PostgreSQL del backend.',
-    });
+    const message = syncStage.startsWith('firebase')
+      ? 'El backend no pudo verificar la sesión o asignar el rol en Firebase. Revisa FIREBASE_PROJECT_ID, FIREBASE_SERVICE_ACCOUNT_JSON y los permisos de Firebase Authentication en Render.'
+      : 'Firebase verificó la sesión, pero no se pudo guardar la cuenta en PostgreSQL. Revisa DATABASE_URL y la conexión de la base de Render.';
+    return res.status(error.statusCode || 503).json({ error: message, stage: syncStage });
   }
 });
 
