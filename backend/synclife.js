@@ -305,114 +305,92 @@ async function analizarNutricion(comidaNombre = "Saludable") {
   }
 }
 
-function getNutritionPer100g(nutriments, key, unit) {
-  const rawValue = nutriments[`${key}_100g`];
-  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
-  const value = Number(rawValue);
-  if (!Number.isFinite(value) || value < 0) return null;
-  return {
-    value,
-    unit: nutriments[`${key}_unit`] || unit,
-  };
-}
-
-function convertNutrientUnit(nutrient, targetUnit) {
-  if (!nutrient) return null;
-  const unit = String(nutrient.unit || '').toLocaleLowerCase('en').replace('μ', 'µ');
-  const value = nutrient.value;
-  if (targetUnit === 'mg') {
-    if (unit === 'g') return value * 1000;
-    if (unit === 'µg' || unit === 'mcg' || unit === 'μg') return value / 1000;
-    return value;
-  }
-  if (targetUnit === 'µg') {
-    if (unit === 'g') return value * 1000000;
-    if (unit === 'mg') return value * 1000;
-    return value;
-  }
-  if (targetUnit === 'g') {
-    if (unit === 'mg') return value / 1000;
-    if (unit === 'µg' || unit === 'mcg' || unit === 'μg') return value / 1000000;
-    return value;
-  }
-  return value;
-}
-
 async function buscarProductosNutricion(comidaNombre) {
-  const fields = [
-    'code', 'product_name', 'brands', 'quantity', 'serving_size', 'nutriments',
-  ].join(',');
-  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(comidaNombre)}&search_simple=1&action=process&json=1&page_size=8&fields=${encodeURIComponent(fields)}`;
-  const data = await fetchJson(url);
-  if (!Array.isArray(data.products)) {
-    throw new Error('Open Food Facts devolvió una respuesta que no se pudo leer.');
+  const apiKey = process.env.FDC_API_KEY || 'DEMO_KEY';
+  const aliases = [
+    [/\b(lentejas?)\b/gi, 'lentils'],
+    [/\b(carne\s+de\s+res|res)\b/gi, 'beef'],
+    [/\b(pollo)\b/gi, 'chicken'],
+    [/\b(arroz)\b/gi, 'rice'],
+    [/\b(pescado)\b/gi, 'fish'],
+    [/\b(huevo|huevos)\b/gi, 'egg'],
+    [/\b(papas?|patatas?)\b/gi, 'potato'],
+    [/\b(tomates?)\b/gi, 'tomato'],
+    [/\b(pan)\b/gi, 'bread'],
+    [/\b(leche)\b/gi, 'milk'],
+    [/\b(avena)\b/gi, 'oats'],
+    [/\b(frijoles?|porotos?)\b/gi, 'beans'],
+    [/\b(quinua|quinoa)\b/gi, 'quinoa'],
+    [/\b(queso)\b/gi, 'cheese'],
+    [/\b(platano|plátano|banana)\b/gi, 'banana'],
+    [/\b(manzana)\b/gi, 'apple'],
+    [/\b(aceite)\b/gi, 'oil'],
+  ];
+  const query = aliases.reduce(
+    (translated, [pattern, replacement]) => translated.replace(pattern, replacement),
+    comidaNombre,
+  );
+  const url = new URL('https://api.nal.usda.gov/fdc/v1/foods/search');
+  url.searchParams.set('query', query);
+  url.searchParams.set('pageSize', '8');
+  url.searchParams.append('dataType', 'Foundation');
+  url.searchParams.append('dataType', 'SR Legacy');
+  url.searchParams.append('dataType', 'Survey (FNDDS)');
+  url.searchParams.set('api_key', apiKey);
+  const data = await fetchJson(url.toString());
+  if (!Array.isArray(data.foods)) {
+    throw new Error('FoodData Central devolvió una respuesta que no se pudo leer.');
   }
 
-  const micronutrientFields = [
-    ['calcium', 'Calcio', 'mg'],
-    ['iron', 'Hierro', 'mg'],
-    ['potassium', 'Potasio', 'mg'],
-    ['magnesium', 'Magnesio', 'mg'],
-    ['vitamin-c', 'Vitamina C', 'mg'],
-    ['vitamin-a', 'Vitamina A', 'µg'],
+  const nutrientIds = {
+    energyKcal: 1008,
+    proteinG: 1003,
+    carbohydratesG: 1005,
+    fatG: 1004,
+    fiberG: 1079,
+    sodiumMg: 1093,
+    addedSugarG: 1235,
+  };
+  const micronutrientIds = [
+    [1087, 'Calcio', 'mg'],
+    [1089, 'Hierro', 'mg'],
+    [1092, 'Potasio', 'mg'],
+    [1090, 'Magnesio', 'mg'],
+    [1162, 'Vitamina C', 'mg'],
+    [1106, 'Vitamina A', 'µg'],
   ];
+  const validNutrientValue = (nutrient) => (
+    typeof nutrient?.value === 'number' && Number.isFinite(nutrient.value) && nutrient.value >= 0
+      ? nutrient.value
+      : null
+  );
 
-  return data.products
-    .filter((product) => typeof product.product_name === 'string' && product.product_name.trim())
-    .map((product) => {
-      const nutriments = product.nutriments || {};
-      let energyKcal = getNutritionPer100g(nutriments, 'energy-kcal', 'kcal');
-      if (!energyKcal) {
-        const energyKj = getNutritionPer100g(nutriments, 'energy', 'kJ');
-        if (energyKj) {
-          energyKcal = {
-            value: energyKj.unit.toLocaleLowerCase('en') === 'kcal'
-              ? energyKj.value
-              : energyKj.value / 4.184,
-            unit: 'kcal',
-          };
-        }
-      }
-      const sodium = getNutritionPer100g(nutriments, 'sodium', 'g');
-      const salt = getNutritionPer100g(nutriments, 'salt', 'g');
-      const sodiumMg = sodium
-        ? { value: convertNutrientUnit(sodium, 'mg'), unit: 'mg' }
-        : salt
-          ? {
-            value: convertNutrientUnit(salt, 'g') * 393.4,
-            unit: 'mg',
-          }
-          : null;
-      const addedSugar = convertNutrientUnit(
-        getNutritionPer100g(nutriments, 'added-sugars', 'g'),
-        'g',
-      );
-      const micronutrients = micronutrientFields.flatMap(([key, name, defaultUnit]) => {
-        const nutrient = getNutritionPer100g(nutriments, key, 'g');
-        return nutrient
-          ? [{ name, value: convertNutrientUnit(nutrient, defaultUnit), unit: defaultUnit }]
-          : [];
+  return data.foods
+    .map((food) => {
+      const nutrients = new Map((food.foodNutrients || []).map((nutrient) => [
+        Number(nutrient.nutrientId),
+        nutrient,
+      ]));
+      const getValue = (nutrientId) => validNutrientValue(nutrients.get(nutrientId));
+      const micronutrients = micronutrientIds.flatMap(([id, name, unit]) => {
+        const value = getValue(id);
+        return value === null ? [] : [{ name, value, unit }];
       });
-
+      const per100g = Object.fromEntries(
+        Object.entries(nutrientIds).map(([field, nutrientId]) => [field, getValue(nutrientId)]),
+      );
+      per100g.micronutrients = micronutrients;
       return {
-        code: typeof product.code === 'string' ? product.code : '',
-        name: product.product_name.trim().slice(0, 160),
-        brand: typeof product.brands === 'string' ? product.brands.trim().slice(0, 100) : '',
-        servingSize: typeof product.serving_size === 'string' ? product.serving_size.slice(0, 80) : '',
-        quantity: typeof product.quantity === 'string' ? product.quantity.slice(0, 80) : '',
-        per100g: {
-          energyKcal: energyKcal?.value ?? null,
-          proteinG: convertNutrientUnit(getNutritionPer100g(nutriments, 'proteins', 'g'), 'g'),
-          carbohydratesG: convertNutrientUnit(getNutritionPer100g(nutriments, 'carbohydrates', 'g'), 'g'),
-          fatG: convertNutrientUnit(getNutritionPer100g(nutriments, 'fat', 'g'), 'g'),
-          fiberG: convertNutrientUnit(getNutritionPer100g(nutriments, 'fiber', 'g'), 'g'),
-          sodiumMg: sodiumMg?.value ?? null,
-          addedSugarG: addedSugar,
-          micronutrients,
-        },
+        code: String(food.fdcId || ''),
+        name: typeof food.description === 'string' ? food.description.trim().slice(0, 160) : '',
+        brand: '',
+        servingSize: '',
+        quantity: '',
+        source: 'USDA FoodData Central',
+        per100g,
       };
     })
-    .filter((product) => Object.entries(product.per100g)
+    .filter((food) => food.name && Object.entries(food.per100g)
       .some(([key, value]) => key === 'micronutrients' ? value.length > 0 : value !== null))
     .slice(0, 8);
 }

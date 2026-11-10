@@ -1532,7 +1532,7 @@ export default function App() {
     setMealAddedSugar(scaleNutritionValue(nutrition.addedSugarG, factor));
     setMealMicronutrients(micronutrients);
     setMealNutritionEstimate({
-      source: 'Open Food Facts',
+      source: product.source || 'USDA FoodData Central',
       retrievedAt: product.retrievedAt || null,
       productName: product.name,
       brand: product.brand,
@@ -1574,10 +1574,10 @@ export default function App() {
         retrievedAt: result.retrievedAt,
       }));
       setMealNutritionMatches(matches);
-      if (!matches.length) throw new Error('Open Food Facts no devolvió alimentos con datos nutricionales.');
+      if (!matches.length) throw new Error('FoodData Central no devolvió alimentos con datos nutricionales.');
       selectNutritionMatch(matches[0], 0);
     } catch (error) {
-      console.error('No se pudieron consultar los nutrientes de Open Food Facts:', error);
+      console.error('No se pudieron consultar los nutrientes de FoodData Central:', error);
       setMealNutritionError(error.message || 'No se pudo conectar con la API nutricional.');
     } finally {
       setIsSearchingMealNutrition(false);
@@ -2782,7 +2782,7 @@ export default function App() {
                 <div className="field"><label htmlFor="meal-cost">Costo estimado del plato (PEN)</label><input id="meal-cost" type="number" min="0" step="0.1" value={mealCost} onChange={(event) => setMealCost(event.target.value)} placeholder="0.00" required /></div>
                 <details className="meal-nutrition-details" open>
                   <summary><Activity size={15} /> Consultar nutrientes o ingresarlos manualmente</summary>
-                  <p>Los datos provienen de Open Food Facts. Si no indicas un peso en gramos o kilogramos, se muestran por 100 g; los productos pueden no coincidir exactamente con un plato preparado.</p>
+                  <p>Los datos provienen de USDA FoodData Central. Si no indicas un peso en gramos o kilogramos, se muestran por 100 g; el resultado es un alimento de referencia, no una receta exacta.</p>
                   <button className="estimate-nutrients-button" type="button" onClick={searchMealNutrition} disabled={isSearchingMealNutrition || !mealName.trim()}>
                     <Activity size={15} /> {isSearchingMealNutrition ? 'Buscando…' : 'Consultar API nutricional'}
                   </button>
@@ -3025,7 +3025,7 @@ export default function App() {
                   <li><CloudSun size={16} /><span><strong>Open-Meteo</strong><small>Proveedor principal del clima</small></span><CheckCircle2 size={15} /></li>
                   <li><CloudSun size={16} /><span><strong>wttr.in</strong><small>Proveedor alternativo automático</small></span><CheckCircle2 size={15} /></li>
                   <li><CircleDollarSign size={16} /><span><strong>Tipo de cambio</strong><small>ExchangeRate-API con respaldo Frankfurter</small></span><CheckCircle2 size={15} /></li>
-                  <li><Salad size={16} /><span><strong>Open Food Facts</strong><small>Información nutricional</small></span><CheckCircle2 size={15} /></li>
+                  <li><Salad size={16} /><span><strong>USDA FoodData Central</strong><small>Información nutricional</small></span><CheckCircle2 size={15} /></li>
                 </ul>
               </section>
               <section className="card preview-card">

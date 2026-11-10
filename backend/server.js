@@ -188,16 +188,16 @@ app.post('/api/synclife/nutrition/search', async (req, res) => {
 
     const matches = await buscarProductosNutricion(food);
     if (!matches.length) {
-      return res.status(404).json({ error: 'Open Food Facts no encontró productos con información nutricional para esa búsqueda. Prueba con un alimento más específico.' });
+      return res.status(404).json({ error: 'FoodData Central no encontró alimentos con datos nutricionales. Prueba escribiendo el ingrediente en español o en inglés.' });
     }
     return res.json({
       matches,
-      source: 'Open Food Facts',
+      source: 'USDA FoodData Central',
       retrievedAt: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('No se pudieron consultar los datos nutricionales de Open Food Facts:', error.message);
-    return res.status(502).json({ error: 'No se pudo consultar Open Food Facts. Revisa la conexión e inténtalo nuevamente.' });
+    console.error('No se pudieron consultar los datos nutricionales de FoodData Central:', error.message);
+    return res.status(502).json({ error: 'No se pudo consultar FoodData Central. Revisa la conexión y la cuota de la API; puedes configurar una clave gratuita FDC_API_KEY en Render.' });
   }
 });
 
