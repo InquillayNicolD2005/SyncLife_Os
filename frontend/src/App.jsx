@@ -1682,18 +1682,26 @@ export default function App() {
     }
   };
 
-  const openAdminEntry = () => {
+  const openAdminEntry = async () => {
     if (isAdmin) {
       setNotification('');
       setVista('admin');
-    } else if (isLoggedIn) {
-      setNotification('No tienes permisos de administrador');
     } else {
-      setAdminEntryRequested(true);
       setAuthMode('login');
       setAuthEmail('admin@gmail.com');
+      setAuthPassword('');
       setAuthError('');
-      setAuthNotice('Inicia sesión con admin@gmail.com o con otra cuenta que ya tenga el rol de administrador.');
+      setAuthNotice('Inicia sesión con admin@gmail.com y la contraseña configurada en Firebase.');
+      if (isLoggedIn) {
+        try {
+          await signOut(auth);
+        } catch (error) {
+          console.error('No se pudo cerrar la sesión actual antes de entrar como administrador:', error);
+          setAuthError('No se pudo cambiar de cuenta. Cierra sesión e inténtalo de nuevo.');
+        }
+      } else {
+        setAdminEntryRequested(true);
+      }
     }
   };
 
