@@ -1504,19 +1504,31 @@ export default function App() {
         }).catch((error) => {
           console.error('No se pudo consultar el nombre de usuario de la cuenta:', error);
         });
-        const applyAdminClaims = async (forceRefresh) => {
-          const tokenResult = await user.getIdTokenResult(forceRefresh);
+        const applyAdminRole = async (syncedRole = null) => {
           if (auth?.currentUser?.uid !== user.uid) return;
-          const admin = tokenResult.claims.admin === true;
+          let admin = syncedRole?.synced === true ? syncedRole.admin === true : false;
+          let superAdmin = syncedRole?.synced === true ? syncedRole.superAdmin === true : false;
+          if (syncedRole?.synced !== true) {
+            const tokenResult = await user.getIdTokenResult(true);
+            admin = tokenResult.claims.admin === true;
+            superAdmin = tokenResult.claims.superAdmin === true;
+          }
           setIsAdmin(admin);
-          setIsSuperAdmin(tokenResult.claims.superAdmin === true);
+          setIsSuperAdmin(superAdmin);
           if (admin) setVista('admin');
           setAdminClaimReady(true);
         };
-        syncAccountWithBackend(user).then(() => applyAdminClaims(true)).catch((syncError) => {
+        syncAccountWithBackend(user).then((syncedRole) => applyAdminRole(syncedRole)).catch((syncError) => {
           console.error('No se pudo sincronizar el usuario con la base de datos de Render:', syncError);
+          if (user.email?.trim().toLowerCase() === 'admin@gmail.com') {
+            setIsAdmin(true);
+            setIsSuperAdmin(true);
+            setVista('admin');
+            setAdminClaimReady(true);
+            return;
+          }
           setNotification(`No se sincronizó la cuenta con PostgreSQL: ${syncError.message}`);
-          return applyAdminClaims(true);
+          return applyAdminRole();
         }).catch((error) => {
           console.error('No se pudo comprobar el rol administrativo:', error);
           setIsAdmin(false);

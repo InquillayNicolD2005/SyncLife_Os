@@ -23,6 +23,12 @@ let firebaseAccountSync;
 
 function sendAdminError(res, error, fallbackMessage) {
   console.error(fallbackMessage, error);
+  if (error.code === 'auth/insufficient-permission' || error.code === 'permission-denied'
+    || error.code === 7) {
+    return res.status(503).json({
+      error: 'La cuenta de servicio de Firebase en Render necesita permisos de Firebase Authentication Admin para gestionar usuarios.',
+    });
+  }
   if (error.code === 'auth/id-token-expired' || error.code === 'auth/invalid-id-token'
     || error.code === 'auth/argument-error' || error.code === 'auth/id-token-revoked') {
     return res.status(401).json({ error: 'La sesión expiró. Inicia sesión de nuevo.' });
@@ -53,7 +59,9 @@ async function authenticate(req, res, next) {
 }
 
 async function requireAdmin(req, res, next) {
-  if (req.authToken?.admin !== true || req.authUser.customClaims?.admin !== true) {
+  const isFirebaseAdmin = req.authToken?.admin === true
+    && req.authUser.customClaims?.admin === true;
+  if (!isFirebaseAdmin && !isRootAccount(req.authUser)) {
     return res.status(403).json({ error: 'Se requiere el rol de administrador.' });
   }
   try {
@@ -67,8 +75,7 @@ async function requireAdmin(req, res, next) {
 }
 
 function requireRootAdmin(req, res, next) {
-  if (!isRootAccount(req.authUser) || req.authToken?.superAdmin !== true
-    || req.authUser.customClaims?.superAdmin !== true) {
+  if (!isRootAccount(req.authUser)) {
     return res.status(403).json({ error: 'Solo la cuenta propietaria puede gestionar administradores.' });
   }
   return next();

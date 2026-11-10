@@ -171,41 +171,15 @@ router.post('/sync', async (req, res) => {
   try {
     const { auth } = getAdminServices();
     const decodedToken = await auth.verifyIdToken(match[1], true);
-    let user = await auth.getUser(decodedToken.uid);
+    const user = await auth.getUser(decodedToken.uid);
     if (user.disabled) return res.status(403).json({ error: 'Esta cuenta está deshabilitada.' });
 
-    syncStage = 'firebase-admin-claim';
-    if (isRootAccount(user)
-      && (user.customClaims?.admin !== true || user.customClaims?.superAdmin !== true)) {
-      await auth.setCustomUserClaims(user.uid, {
-        ...user.customClaims,
-        admin: true,
-        superAdmin: true,
-      });
-      user = await auth.getUser(user.uid);
-    }
-
     syncStage = 'postgres-account-sync';
-    let accountRole = await syncAccount(user);
-    const claims = { ...user.customClaims };
-    const shouldHaveAdminClaim = accountRole.admin;
-    const shouldHaveSuperAdminClaim = accountRole.superAdmin && isRootAccount(user);
-    if ((claims.admin === true) !== shouldHaveAdminClaim
-      || (claims.superAdmin === true) !== shouldHaveSuperAdminClaim) {
-      if (shouldHaveAdminClaim) claims.admin = true;
-      else delete claims.admin;
-      if (shouldHaveSuperAdminClaim) claims.superAdmin = true;
-      else delete claims.superAdmin;
-      await auth.setCustomUserClaims(user.uid, claims);
-      syncStage = 'firebase-admin-claim-refresh';
-      user = await auth.getUser(user.uid);
-      syncStage = 'postgres-account-sync';
-      accountRole = await syncAccount(user);
-    }
+    const accountRole = await syncAccount(user);
     return res.json({
       synced: true,
       admin: accountRole.admin,
-      superAdmin: accountRole.superAdmin && isRootAccount(user),
+      superAdmin: accountRole.superAdmin,
     });
   } catch (error) {
     console.error(`No se pudo sincronizar la cuenta (etapa: ${syncStage}):`, error);
@@ -220,16 +194,11 @@ router.post('/sync', async (req, res) => {
       'firebase/project-mismatch': 'FIREBASE_PROJECT_ID no coincide con el proyecto de FIREBASE_SERVICE_ACCOUNT_JSON. Ambos deben ser synclife-os-b2daf.',
       'firebase/invalid-service-account-json': 'FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido. Vuelve a copiar el JSON completo de la cuenta de servicio en Render.',
       'firebase/incomplete-service-account': 'FIREBASE_SERVICE_ACCOUNT_JSON debe incluir project_id, client_email y private_key.',
-      'firebase-authentication': 'No se pudo validar la sesión. En Render, verifica que FIREBASE_PROJECT_ID sea synclife-os-b2daf y que FIREBASE_SERVICE_ACCOUNT_JSON pertenezca a ese mismo proyecto.',
-      'firebase-admin-claim': 'No se pudo asignar el rol en Firebase. La cuenta de servicio de FIREBASE_SERVICE_ACCOUNT_JSON necesita permisos de administrador de Firebase Authentication.',
-      'firebase-admin-claim-refresh': 'No se pudieron actualizar los permisos de la sesión en Firebase. Revisa los permisos de administrador de Firebase Authentication de la cuenta de servicio.',
-    })[error.code] || ({
-      'firebase-authentication': 'No se pudo validar la sesión. En Render, verifica que FIREBASE_PROJECT_ID sea synclife-os-b2daf y que FIREBASE_SERVICE_ACCOUNT_JSON pertenezca a ese mismo proyecto.',
-      'firebase-admin-claim': 'No se pudo asignar el rol en Firebase. La cuenta de servicio de FIREBASE_SERVICE_ACCOUNT_JSON necesita permisos de administrador de Firebase Authentication.',
-      'firebase-admin-claim-refresh': 'No se pudieron actualizar los permisos de la sesión en Firebase. Revisa los permisos de administrador de Firebase Authentication de la cuenta de servicio.',
-    })[syncStage];
-    const message = firebaseMessage
-      || 'Firebase verificó la sesión, pero no se pudo guardar la cuenta en PostgreSQL. Revisa DATABASE_URL y la conexión de la base de Render.';
+      'auth/insufficient-permission': 'La cuenta de servicio configurada en Render no puede leer usuarios de Firebase Authentication. Asígnale el rol Firebase Authentication Admin.',
+    })[error.code];
+    const message = firebaseMessage || (syncStage === 'firebase-authentication'
+      ? 'No se pudo validar la sesión. En Render, verifica que FIREBASE_PROJECT_ID sea synclife-os-b2daf y que FIREBASE_SERVICE_ACCOUNT_JSON pertenezca a ese mismo proyecto.'
+      : 'Firebase verificó la sesión, pero no se pudo guardar la cuenta en PostgreSQL. Revisa DATABASE_URL y la conexión de la base de Render.');
     return res.status(error.statusCode || 503).json({
       error: message,
       stage: syncStage,
