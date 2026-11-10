@@ -60,13 +60,11 @@ const changeAdminRole = async (action) => {
   }
 };
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
-const apiUrl = (path) => {
-  if (import.meta.env.PROD && !API_BASE_URL) {
-    throw new Error('Falta VITE_API_URL en Vercel. Configúrala con la URL del backend en Render y vuelve a desplegar.');
-  }
-  return `${API_BASE_URL}${path}`;
-};
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL
+  || (import.meta.env.PROD ? 'https://synclife-os.onrender.com' : '')
+).replace(/\/+$/, '');
+const apiUrl = (path) => `${API_BASE_URL}${path}`;
 
 async function adminRequest(user, path, options = {}) {
   if (!user) throw new Error('No hay una sesión válida. Inicia sesión de nuevo.');
