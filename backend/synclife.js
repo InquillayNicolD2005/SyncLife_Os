@@ -308,34 +308,66 @@ async function analizarNutricion(comidaNombre = "Saludable") {
 async function buscarProductosNutricion(comidaNombre) {
   const apiKey = process.env.FDC_API_KEY || 'DEMO_KEY';
   const aliases = [
-    [/\b(lentejas?)\b/gi, 'lentils'],
-    [/\b(carne\s+de\s+res|res)\b/gi, 'beef'],
-    [/\b(pollo)\b/gi, 'chicken'],
-    [/\b(arroz)\b/gi, 'rice'],
-    [/\b(pescado)\b/gi, 'fish'],
-    [/\b(huevo|huevos)\b/gi, 'egg'],
-    [/\b(papas?|patatas?)\b/gi, 'potato'],
-    [/\b(tomates?)\b/gi, 'tomato'],
-    [/\b(pan)\b/gi, 'bread'],
-    [/\b(leche)\b/gi, 'milk'],
-    [/\b(avena)\b/gi, 'oats'],
-    [/\b(frijoles?|porotos?)\b/gi, 'beans'],
-    [/\b(quinua|quinoa)\b/gi, 'quinoa'],
-    [/\b(queso)\b/gi, 'cheese'],
-    [/\b(platano|plátano|banana)\b/gi, 'banana'],
-    [/\b(manzana)\b/gi, 'apple'],
-    [/\b(aceite)\b/gi, 'oil'],
+    ['a la plancha', 'grilled'],
+    ['a la parrilla', 'grilled'],
+    ['horneado', 'baked'],
+    ['horneada', 'baked'],
+    ['hervido', 'boiled'],
+    ['hervida', 'boiled'],
+    ['asado', 'roasted'],
+    ['asada', 'roasted'],
+    ['frito', 'fried'],
+    ['frita', 'fried'],
+    ['carne de res', 'beef'],
+    ['carne molida', 'ground beef'],
+    ['pure de papa', 'mashed potato'],
+    ['frijoles negros', 'black beans'],
+    ['garbanzos', 'chickpeas'],
+    ['lentejas', 'lentils'],
+    ['lenteja', 'lentil'],
+    ['pollo', 'chicken'],
+    ['arroz', 'rice'],
+    ['pescado', 'fish'],
+    ['huevos', 'eggs'],
+    ['huevo', 'egg'],
+    ['papas', 'potatoes'],
+    ['papa', 'potato'],
+    ['patatas', 'potatoes'],
+    ['patata', 'potato'],
+    ['tomates', 'tomatoes'],
+    ['tomate', 'tomato'],
+    ['pan', 'bread'],
+    ['leche', 'milk'],
+    ['avena', 'oats'],
+    ['frijoles', 'beans'],
+    ['porotos', 'beans'],
+    ['quinua', 'quinoa'],
+    ['quinoa', 'quinoa'],
+    ['queso', 'cheese'],
+    ['cafe', 'coffee'],
+    ['platano', 'banana'],
+    ['banana', 'banana'],
+    ['manzana', 'apple'],
+    ['aceite', 'oil'],
+    ['ensalada', 'salad'],
   ];
-  const query = aliases.reduce(
-    (translated, [pattern, replacement]) => translated.replace(pattern, replacement),
-    comidaNombre,
-  );
+  const normalizeText = (text) => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('en');
+  let query = normalizeText(comidaNombre);
+  aliases.forEach(([phrase, replacement]) => {
+    const pattern = phrase.split(' ').map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+    query = query.replace(new RegExp(`\\b${pattern}\\b`, 'g'), replacement);
+  });
+  const stopWords = new Set(['a', 'al', 'and', 'con', 'de', 'del', 'el', 'en', 'for', 'la', 'las', 'los', 'of', 'para', 'por', 'the', 'un', 'una', 'unos', 'unas', 'y']);
+  const preparationWords = new Set(['baked', 'boiled', 'fried', 'grilled', 'roasted', 'steamed']);
+  const allTokens = [...new Set((query.match(/[a-z0-9]+/g) || [])
+    .filter((token) => !stopWords.has(token)))];
+  const preparationTokens = allTokens.filter((token) => preparationWords.has(token));
+  const queryTokens = allTokens.filter((token) => !preparationWords.has(token));
+  if (!queryTokens.length) return [];
+  const queryTerms = [...queryTokens, ...preparationTokens].join(' ');
   const url = new URL('https://api.nal.usda.gov/fdc/v1/foods/search');
-  url.searchParams.set('query', query);
-  url.searchParams.set('pageSize', '8');
-  url.searchParams.append('dataType', 'Foundation');
-  url.searchParams.append('dataType', 'SR Legacy');
-  url.searchParams.append('dataType', 'Survey (FNDDS)');
+  url.searchParams.set('query', queryTerms);
+  url.searchParams.set('pageSize', '20');
   url.searchParams.set('api_key', apiKey);
   const data = await fetchJson(url.toString());
   if (!Array.isArray(data.foods)) {
@@ -364,8 +396,15 @@ async function buscarProductosNutricion(comidaNombre) {
       ? nutrient.value
       : null
   );
+  const tokenSynonyms = {
+    beans: ['frijoles', 'porotos'],
+    coffee: ['cafe'],
+    chicken: ['pollo'],
+    milk: ['leche'],
+    rice: ['arroz'],
+  };
 
-  return data.foods
+  const matches = data.foods
     .map((food) => {
       const nutrients = new Map((food.foodNutrients || []).map((nutrient) => [
         Number(nutrient.nutrientId),
@@ -387,12 +426,56 @@ async function buscarProductosNutricion(comidaNombre) {
         servingSize: '',
         quantity: '',
         source: 'USDA FoodData Central',
+        dataType: typeof food.dataType === 'string' ? food.dataType : '',
+        foodCategory: typeof food.foodCategory === 'string' ? food.foodCategory : '',
         per100g,
+        apiScore: Number.isFinite(food.score) ? food.score : 0,
       };
     })
     .filter((food) => food.name && Object.entries(food.per100g)
       .some(([key, value]) => key === 'micronutrients' ? value.length > 0 : value !== null))
-    .slice(0, 8);
+    .map((food) => {
+      const descriptionTokens = new Set(normalizeText(food.name).match(/[a-z0-9]+/g) || []);
+      const matchesToken = (token) => descriptionTokens.has(token)
+        || (tokenSynonyms[token] || []).some((synonym) => descriptionTokens.has(synonym));
+      const matchedTokens = queryTokens.filter(matchesToken);
+      const matchedPreparations = preparationTokens.filter((token) => descriptionTokens.has(token));
+      const coverage = matchedTokens.length / queryTokens.length;
+      const preparationCoverage = preparationTokens.length
+        ? matchedPreparations.length / preparationTokens.length
+        : 0;
+      const minimumMatchedTokens = Math.max(1, Math.ceil(queryTokens.length * 0.6));
+      const isPreparedDish = queryTokens.length > 1
+        && (food.dataType === 'Survey (FNDDS)' || /mixed dish/i.test(food.foodCategory));
+      return {
+        food,
+        matchedTokens,
+        matchedPreparations,
+        coverage,
+        preparationCoverage,
+        minimumMatchedTokens,
+        isPreparedDish,
+      };
+    })
+    .filter(({ matchedTokens, minimumMatchedTokens }) => matchedTokens.length >= minimumMatchedTokens)
+    .sort((first, second) => (
+      second.coverage - first.coverage
+      || second.preparationCoverage - first.preparationCoverage
+      || Number(second.isPreparedDish) - Number(first.isPreparedDish)
+      || second.food.apiScore - first.food.apiScore
+      || first.food.name.localeCompare(second.food.name)
+    ))
+    .slice(0, 8)
+    .map(({ food, matchedTokens, matchedPreparations, coverage }) => {
+      const { apiScore, ...match } = food;
+      return {
+        ...match,
+        searchMatch: coverage === 1 ? 'complete' : 'partial',
+        matchedIngredients: matchedTokens,
+        matchedPreparations,
+      };
+    });
+  return matches;
 }
 
 function generarDiagnostico(datos) {

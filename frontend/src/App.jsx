@@ -1,16 +1,16 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, ArrowDownRight, ArrowUpRight, BarChart3, Bell, CalendarDays, Clock3,
-  Check, CheckCircle2, ChevronLeft, ChevronRight, Circle, CircleDollarSign,
+  Activity, BarChart3, Bell, CalendarDays,
+  Check, CheckCircle2, ChevronLeft, ChevronRight, CircleDollarSign,
   ClipboardList, CloudSun, Download, Dumbbell, Flame, HelpCircle, Home, LayoutDashboard, LogOut, Pause, Play,
-  ListTodo, MapPin, Pencil, Plus, Salad, Save, Sparkles, Star, Target, Trash2, Utensils, Wallet,
+  ListTodo, MapPin, Pencil, Plus, Salad, Sparkles, Target, Trash2, Utensils, Wallet,
   Shirt, Pill, ShoppingBag, Coffee, RefreshCw, Search, ShieldCheck, Users, Lock, Unlock, Menu, X,
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import {
-  createUserWithEmailAndPassword, getRedirectResult, GoogleAuthProvider, onAuthStateChanged,
-  sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect,
-  signOut, updateProfile,
+  browserLocalPersistence, browserSessionPersistence, createUserWithEmailAndPassword, deleteUser, getRedirectResult,
+  EmailAuthProvider, GoogleAuthProvider, linkWithCredential, onAuthStateChanged, sendPasswordResetEmail, setPersistence,
+  signInWithCustomToken, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect, signOut, updateProfile,
 } from 'firebase/auth';
 import { auth, firebaseConfigured } from './firebase';
 import './App.css';
@@ -30,6 +30,34 @@ const STORAGE_KEYS = {
   expenses: 'synclife-daily-expenses',
   habitDate: 'synclife-habit-date',
   generatedWorkouts: 'synclife-generated-workouts',
+  exerciseSessions: 'synclife-exercise-sessions',
+};
+
+const changeAdminRole = async (action) => {
+  setBusyAdminRole(true);
+  setError('');
+  setNotice('');
+  try {
+    const result = action.type === 'grant-admin'
+      ? await adminRequest(user, '/api/admin/admins', {
+        method: 'POST',
+        body: JSON.stringify({ email: action.email }),
+      })
+      : await adminRequest(user, `/api/admin/admins/${encodeURIComponent(action.account.uid)}`, {
+        method: 'DELETE',
+      });
+    setAdminEmail('');
+    const refreshed = await refreshOverview();
+    setNotice(result.warning || (action.type === 'grant-admin'
+      ? `${result.user.email} ahora es administrador. Debe volver a iniciar sesión para recibir el acceso.`
+      : `${action.account.email || action.account.name} ya no tiene acceso administrativo.`));
+    if (!refreshed) setNotice('El cambio se guardó, pero no se pudo actualizar la lista. Actualiza el panel.');
+  } catch (requestError) {
+    console.error('No se pudo actualizar el rol administrativo:', requestError);
+    setError(requestError.message);
+  } finally {
+    setBusyAdminRole(false);
+  }
 };
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
@@ -85,11 +113,37 @@ async function syncAccountWithBackend(user) {
   }
   return result;
 }
-function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
+
+async function accountRequest(path, { user, ...options } = {}) {
+  const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
+  if (user) headers.Authorization = `Bearer ${await user.getIdToken()}`;
+  const response = await fetch(apiUrl(`/api/account${path}`), { ...options, headers });
+  const responseText = await response.text();
+  let result = {};
+  if (responseText) {
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      throw new Error('El servidor devolvió una respuesta que no se pudo leer.');
+    }
+  }
+  if (!response.ok) throw new Error(result.error || 'No se pudo completar la solicitud.');
+  return result;
+}
+
+async function saveAccountUsername(user, username) {
+  return accountRequest('/username', {
+    user,
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  });
+}
+function AdminPanel({ user, isAdmin, isSuperAdmin, onRefreshClaim, onExit }) {
   const [section, setSection] = useState('summary');
   const [metrics, setMetrics] = useState(null);
   const [users, setUsers] = useState([]);
   const [adminAccounts, setAdminAccounts] = useState([]);
+  const [adminEmail, setAdminEmail] = useState('');
   const [nextPageToken, setNextPageToken] = useState(null);
   const [search, setSearch] = useState('');
   const [userStatusFilter, setUserStatusFilter] = useState('all');
@@ -109,6 +163,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [busyUid, setBusyUid] = useState('');
+  const [busyAdminRole, setBusyAdminRole] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -226,7 +281,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
     try {
       const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}`, { method: 'DELETE' });
       setUsers((current) => current.filter((item) => item.uid !== account.uid));
-      setRecords((current) => current.filter((item) => !item.id.startsWith(`${account.uid}_`)));
+      setRecords((current) => current.filter((item) => item.uid !== account.uid && !item.id.startsWith(`${account.uid}_`)));
       const refreshed = await refreshOverview();
       setNotice(result?.warning || (refreshed
         ? 'Cuenta eliminada. Los registros de uso agregado asociados también se borraron.'
@@ -268,10 +323,10 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
     return `${delta > 0 ? '+' : ''}${delta}${unit} frente a la semana anterior`;
   };
   const helpCopy = {
-    summary: 'Cifras generales de las cuentas y de los registros que se guardan en Firebase.',
+    summary: 'Cuentas y actividad agregada sincronizadas con PostgreSQL en Render. El historial anterior de puntajes sigue en Firebase.',
     users: 'Busca una cuenta, revisa su estado y bloquéala o elimínala si hace falta.',
-    records: 'Registros diarios guardados en Firebase. Solo se muestra el puntaje y los datos básicos de la cuenta.',
-    admins: 'La cuenta que tiene permiso para administrar SyncLife. El permiso se configura en el servidor.',
+    records: 'Historial anterior de puntajes. La aplicación ya no crea registros diarios nuevos.',
+    admins: 'La cuenta propietaria es la única que puede otorgar o retirar el acceso administrativo.',
     apis: 'Comprueba si los servicios externos que usa SyncLife están disponibles.',
     security: 'El panel y sus datos están protegidos por el permiso de administrador verificado en el servidor.',
   };
@@ -287,7 +342,9 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
   const performConfirmedAction = async () => {
     if (!confirmAction) return;
     setConfirming(true);
-    if (confirmAction.type === 'delete') {
+    if (confirmAction.type === 'grant-admin' || confirmAction.type === 'remove-admin') {
+      await changeAdminRole(confirmAction);
+    } else if (confirmAction.type === 'delete') {
       await deleteAccount(confirmAction.account);
     } else {
       await updateAccountStatus(confirmAction.account, confirmAction.disabled);
@@ -329,9 +386,6 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
         </nav>
         <div className="admin-sidebar-bottom">
           <div className="admin-protection"><ShieldCheck size={17} /><span><strong>Acceso protegido</strong><small>Sesión de administrador</small></span></div>
-          <button type="button" className="admin-back-link" onClick={onBack}>
-            <ChevronLeft size={16} />Volver a SyncLife
-          </button>
           <div className="admin-sidebar-account"><span>{(user?.displayName || user?.email || 'A').charAt(0).toUpperCase()}</span><div><strong>{user?.displayName || 'Administrador'}</strong><small>{user?.email || 'Cuenta verificada'}</small></div></div>
         </div>
       </aside>
@@ -352,7 +406,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
           {helpOpen && <p className="admin-help-copy" role="note">{helpCopy[helpOpen]}</p>}
           {error && <p className="admin-message is-error" role="alert">{error}</p>}
           {notice && <p className="admin-message" role="status">{notice}</p>}
-          {loading && <p className="admin-loading" role="status">Actualizando datos de Firebase…</p>}
+          {loading && <p className="admin-loading" role="status">Actualizando cuentas y métricas de PostgreSQL…</p>}
 
       {section === 'summary' && !loading && metrics && (
         <div className="admin-section">
@@ -370,10 +424,10 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
           </div>
           <div className="admin-metrics">
             {[
-              { label: 'Usuarios registrados', value: metrics.totalUsers, description: 'Cuentas creadas en Firebase', change: formatDelta(metrics.usersThisWeek, metrics.usersPreviousWeek, ' cuentas'), icon: Users, tone: 'green' },
-              { label: 'Registros sincronizados', value: metrics.totalRecords ?? 0, description: 'Días guardados en Firebase', change: formatDelta(metrics.recordsThisWeek, metrics.recordsPreviousWeek, ' registros'), icon: ClipboardList, tone: 'blue' },
-              { label: 'Registros de hoy', value: metrics.recordsToday ?? 0, description: 'Personas que guardaron su día', change: formatDelta(metrics.recordsToday, metrics.recordsSameDayPreviousWeek, ' registros'), icon: Activity, tone: 'amber' },
-              { label: 'Puntaje promedio', value: metrics.averageScore == null ? '—' : `${metrics.averageScore}/100`, description: 'Promedio de los últimos 7 días', change: formatDelta(metrics.averageScore, metrics.previousAverageScore, ' puntos'), icon: BarChart3, tone: 'violet' },
+              { label: 'Usuarios registrados', value: metrics.totalUsers, description: 'Cuentas sincronizadas en PostgreSQL', change: formatDelta(metrics.usersThisWeek, metrics.usersPreviousWeek, ' cuentas'), icon: Users, tone: 'green' },
+              { label: 'Registros históricos', value: metrics.totalRecords ?? 0, description: 'Historial antiguo más nuevos registros administrativos', change: formatDelta(metrics.recordsThisWeek, metrics.recordsPreviousWeek, ' registros'), icon: ClipboardList, tone: 'blue' },
+              { label: 'Registros de hoy', value: metrics.recordsToday ?? 0, description: 'Puntajes guardados en esta fecha', change: formatDelta(metrics.recordsToday, metrics.recordsSameDayPreviousWeek, ' registros'), icon: Activity, tone: 'amber' },
+              { label: 'Puntaje promedio histórico', value: metrics.averageScore == null ? '—' : `${metrics.averageScore}/100`, description: 'Promedio de los registros anteriores', change: formatDelta(metrics.averageScore, metrics.previousAverageScore, ' puntos'), icon: BarChart3, tone: 'violet' },
             ].map(({ label, value, description, change, icon: Icon, tone }) => (
               <article className="admin-metric-card" key={label}>
                 <span className={`admin-metric-icon ${tone}`}><Icon size={18} /></span>
@@ -407,7 +461,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
                     <span className={`admin-record-score ${record.score == null ? '' : record.score >= 70 ? 'high' : record.score >= 40 ? 'medium' : 'low'}`}>{record.score ?? '—'}</span>
                   </article>
                 ))}
-              </div> : <p className="admin-recent-empty">Aún no hay registros sincronizados. Aparecerán cuando alguien guarde su día.</p>}
+              </div> : <p className="admin-recent-empty">No hay registros históricos sincronizados de la versión anterior.</p>}
             </section>
           </div>
           <div className="admin-quick-actions">
@@ -418,7 +472,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
               <button type="button" className="admin-quick-button" onClick={refreshOverview} disabled={loading}><RefreshCw size={17} />Actualizar datos</button>
             </div>
           </div>
-          <p className="admin-footnote">Los registros diarios empiezan a contabilizarse cuando se guardan en Firebase. Los datos de salud y finanzas no se muestran aquí.</p>
+          <p className="admin-footnote">Cuentas y actividad agregada: PostgreSQL en Render. El historial anterior de puntajes permanece en Firebase. No se muestran datos individuales de salud ni finanzas.</p>
         </div>
       )}
       {section === 'summary' && !loading && !metrics && (
@@ -479,12 +533,12 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
 
       {section === 'records' && (
         <div className="admin-section">
-          {sectionHeading('REGISTROS', 'Registros diarios', 'Consulta los puntajes que se han guardado en Firebase.')}
+          {sectionHeading('REGISTROS', 'Registros diarios', 'Consulta los puntajes históricos y los nuevos registros guardados en PostgreSQL.')}
           <div className="admin-users-toolbar">
             <label className="admin-search"><Search size={16} /><input type="search" value={recordSearch} onChange={(event) => setRecordSearch(event.target.value)} placeholder="Buscar nombre, correo o fecha" aria-label="Buscar registros" /></label>
             <label className="admin-date-filter"><span>Fecha</span><input type="date" value={recordDateFilter} onChange={(event) => setRecordDateFilter(event.target.value)} aria-label="Filtrar registros por fecha" /></label>
           </div>
-          {loadingRecords ? <p className="admin-loading" role="status">Cargando registros de Firebase…</p> : (
+          {loadingRecords ? <p className="admin-loading" role="status">Cargando registros históricos…</p> : (
             <div className="admin-table-wrap">
               <table className="admin-users-table admin-records-table">
                 <thead><tr><th>Persona</th><th>Correo</th><th>Fecha</th><th>Puntaje</th></tr></thead>
@@ -497,7 +551,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
                       <td data-label="Puntaje"><span className={`admin-record-score ${record.score == null ? '' : record.score >= 70 ? 'high' : record.score >= 40 ? 'medium' : 'low'}`}>{record.score ?? '—'}{record.score == null ? '' : '/100'}</span></td>
                     </tr>
                   ))}
-                  {!filteredRecords.length && <tr><td className="admin-empty" colSpan="4">{records.length ? 'No hay registros que coincidan con la búsqueda o fecha.' : 'Aún no hay registros diarios sincronizados. Aparecerán aquí cuando alguien guarde su día.'}</td></tr>}
+                  {!filteredRecords.length && <tr><td className="admin-empty" colSpan="4">{records.length ? 'No hay registros que coincidan con la búsqueda o fecha.' : 'No hay registros históricos guardados de la versión anterior.'}</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -508,18 +562,41 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
 
       {section === 'admins' && (
         <div className="admin-section">
-          {sectionHeading('ACCESO', 'Administradores', 'Cuentas que pueden entrar a este panel.') }
+          {sectionHeading('ACCESO', 'Administradores', 'La cuenta propietaria gestiona quién más puede entrar a este panel.') }
+          {isSuperAdmin && (
+            <form className="admin-users-toolbar" onSubmit={(event) => {
+              event.preventDefault();
+              if (adminEmail.trim()) setConfirmAction({ type: 'grant-admin', email: adminEmail.trim() });
+            }}>
+              <label className="admin-search">
+                <ShieldCheck size={16} />
+                <input type="email" autoComplete="email" required value={adminEmail}
+                  onChange={(event) => setAdminEmail(event.target.value)}
+                  placeholder="Correo de una cuenta registrada" aria-label="Correo de cuenta a designar administrador" />
+              </label>
+              <button type="submit" className="admin-load-more" disabled={busyAdminRole}>Dar acceso de administrador</button>
+            </form>
+          )}
           <div className="admin-account-list">
             {adminAccounts.map((account) => (
               <article className="admin-current-account" key={account.uid}>
                 <span className="admin-security-icon"><ShieldCheck size={23} /></span>
-                <div><strong>{account.name || 'Sin nombre'}</strong><p>{account.email || 'Correo no disponible'}</p><span>{account.uid === user?.uid ? 'Sesión actual · Administrador' : 'Administrador activo'}</span></div>
+                <div><strong>{account.name || 'Sin nombre'}</strong><p>{account.email || 'Correo no disponible'}</p><span>{account.superAdmin ? 'Propietario principal' : account.uid === user?.uid ? 'Sesión actual · Administrador' : 'Administrador delegado'}</span></div>
                 <span className="admin-provider-tag">{account.providers?.includes('google.com') ? 'Google' : account.providers?.includes('password') ? 'Correo' : 'Otro'}</span>
+                {isSuperAdmin && !account.superAdmin && (
+                  <button type="button" className="admin-action-button danger"
+                    onClick={() => setConfirmAction({ type: 'remove-admin', account })}
+                    disabled={busyAdminRole}>
+                    <ShieldCheck size={14} />Retirar acceso
+                  </button>
+                )}
               </article>
             ))}
-            {!adminAccounts.length && <p className="admin-loading">No se encontró una cuenta administradora activa.</p>}
+            {!adminAccounts.length && <p className="admin-loading">No se encontró una cuenta administradora sincronizada.</p>}
           </div>
-          <p className="admin-footnote">El rol de administrador se configura de forma segura en Firebase. Aquí solo puedes consultar las cuentas autorizadas.</p>
+          <p className="admin-footnote">{isSuperAdmin
+            ? 'Solo la cuenta propietaria puede conceder o retirar este acceso. Los cambios se validan en el backend y se reflejan en PostgreSQL.'
+            : 'Puedes consultar las cuentas autorizadas. Solo la cuenta propietaria puede cambiar los roles.'}</p>
         </div>
       )}
 
@@ -554,9 +631,9 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
             <div><strong>{isAdmin ? 'Rol de administrador verificado' : 'Sin rol de administrador'}</strong><p>El token de Firebase incluye la custom claim <code>admin: true</code>. El backend verifica la firma y el rol en cada operación privilegiada.</p></div>
           </div>
           <div className="admin-security-grid">
-            <article><strong>Firestore</strong><p>Reglas desplegadas: solo administradores pueden leer los contadores agregados; las escrituras pasan por el backend autenticado.</p></article>
+            <article><strong>PostgreSQL en Render</strong><p>Las cuentas y la actividad agregada nueva se guardan en la base de datos del backend. Los registros históricos anteriores permanecen en Firestore.</p></article>
             <article><strong>Datos personales</strong><p>No se exponen edad, peso, talla, calorías, finanzas, calendario, comidas ni rutinas individuales en el panel.</p></article>
-            <article><strong>Cuenta administradora</strong><p>El permiso de administrador se configura de forma segura en el servidor. No se asigna desde la tabla de usuarios.</p></article>
+            <article><strong>Cuenta propietaria</strong><p>La identidad principal está fijada por el backend. Solo esa cuenta puede conceder o retirar roles administrativos.</p></article>
           </div>
           <button type="button" className="admin-load-more" onClick={onRefreshClaim}>Volver a comprobar mi rol</button>
         </div>
@@ -564,17 +641,21 @@ function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
       {confirmAction && (
         <div className="logout-dialog-backdrop">
           <section className="logout-dialog admin-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-confirm-title">
-            <span className="logout-dialog-icon">{confirmAction.type === 'delete' ? <Trash2 size={20} /> : <Lock size={20} />}</span>
-            <h2 id="admin-confirm-title">{confirmAction.type === 'delete' ? '¿Eliminar esta cuenta?' : confirmAction.disabled ? '¿Bloquear esta cuenta?' : '¿Desbloquear esta cuenta?'}</h2>
+            <span className="logout-dialog-icon">{confirmAction.type === 'delete' ? <Trash2 size={20} /> : confirmAction.type === 'grant-admin' || confirmAction.type === 'remove-admin' ? <ShieldCheck size={20} /> : <Lock size={20} />}</span>
+            <h2 id="admin-confirm-title">{confirmAction.type === 'delete' ? '¿Eliminar esta cuenta?' : confirmAction.type === 'grant-admin' ? '¿Dar acceso de administrador?' : confirmAction.type === 'remove-admin' ? '¿Retirar el acceso de administrador?' : confirmAction.disabled ? '¿Bloquear esta cuenta?' : '¿Desbloquear esta cuenta?'}</h2>
             <p>{confirmAction.type === 'delete'
               ? `Se eliminará la cuenta de ${confirmAction.account.email || confirmAction.account.name} de Firebase. Esta acción no se puede deshacer.`
+              : confirmAction.type === 'grant-admin'
+                ? `La cuenta ${confirmAction.email} podrá acceder al panel y administrar usuarios. Solo la cuenta propietaria podrá gestionar roles de administrador.`
+                : confirmAction.type === 'remove-admin'
+                  ? `${confirmAction.account.email || confirmAction.account.name} perderá el acceso administrativo y deberá iniciar sesión nuevamente.`
               : confirmAction.disabled
                 ? `${confirmAction.account.email || confirmAction.account.name} ya no podrá iniciar sesión en SyncLife.`
                 : `${confirmAction.account.email || confirmAction.account.name} podrá volver a iniciar sesión en SyncLife.`}</p>
             <div className="logout-dialog-actions">
               <button type="button" className="logout-cancel-button" onClick={() => setConfirmAction(null)} disabled={confirming}>Cancelar</button>
               <button type="button" className="logout-confirm-button" onClick={performConfirmedAction} disabled={confirming}>
-                {confirming ? 'Procesando…' : confirmAction.type === 'delete' ? 'Sí, eliminar' : confirmAction.disabled ? 'Sí, bloquear' : 'Sí, desbloquear'}
+                {confirming ? 'Procesando…' : confirmAction.type === 'delete' ? 'Sí, eliminar' : confirmAction.type === 'grant-admin' ? 'Sí, dar acceso' : confirmAction.type === 'remove-admin' ? 'Sí, retirar acceso' : confirmAction.disabled ? 'Sí, bloquear' : 'Sí, desbloquear'}
               </button>
             </div>
           </section>
@@ -679,16 +760,16 @@ const gymWorkoutMoves = ['Prensa ligera', 'Jalón al pecho', 'Peso muerto con ma
 
 function BarChart({ records }) {
   if (!records.length) {
-    return <div className="chart-empty"><BarChart3 size={22} /><span>Guarda tu primer registro para ver aquí tu evolución.</span></div>;
+    return <div className="chart-empty"><BarChart3 size={22} /><span>Tus minutos de actividad aparecerán aquí.</span></div>;
   }
 
-  const max = Math.max(100, ...records.map((record) => Number(record.score) || 0));
+  const max = Math.max(30, ...records.map((record) => Number(record.minutes) || 0));
   return (
-    <div className="bar-chart" role="img" aria-label="Gráfico de barras del rendimiento diario">
+    <div className="bar-chart" role="img" aria-label="Minutos de actividad física por día">
       {records.map((record, index) => {
-        const value = Number(record.score) || 0;
+        const value = Number(record.minutes) || 0;
         return (
-          <div className="bar-chart-column" key={`${record.date}-${index}`} title={`${record.date}: ${value} puntos`}>
+          <div className="bar-chart-column" key={`${record.date}-${index}`} title={`${record.date}: ${value} min`}>
             <span className="bar-chart-value">{value}</span>
             <div className="bar-chart-track"><i style={{ height: `${Math.max(4, value / max * 100)}%` }} /></div>
             <span className="bar-chart-label">{record.date.slice(5)}</span>
@@ -810,6 +891,22 @@ function readUserStored(userId, key, fallback, legacyName = '') {
   }
 }
 
+function readExerciseSessions(userId, legacyName = '') {
+  const savedSessions = readUserStored(userId, STORAGE_KEYS.exerciseSessions, null, legacyName);
+  if (Array.isArray(savedSessions)) return savedSessions;
+  const previousRecords = readUserStored(userId, STORAGE_KEYS.history, [], legacyName);
+  return Array.isArray(previousRecords)
+    ? previousRecords
+      .filter((record) => typeof record.exercise === 'string' && record.exercise.trim() && Number(record.exerciseMinutes) > 0)
+      .map((record) => ({
+        id: `legacy-${record.date}`,
+        activity: record.exercise,
+        minutes: Number(record.exerciseMinutes),
+        date: record.date,
+      }))
+    : [];
+}
+
 function localDate(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -842,57 +939,6 @@ function dateLabel(date, options = { weekday: 'long', day: 'numeric', month: 'lo
   return new Intl.DateTimeFormat('es-PE', options).format(date);
 }
 
-function TrendChart({ records }) {
-  const width = 720;
-  const height = 220;
-  const padding = { top: 16, right: 16, bottom: 32, left: 30 };
-  const values = records.map((record) => record.score);
-  const min = 0;
-  const max = 100;
-  const chartWidth = width - padding.left - padding.right;
-  const chartHeight = height - padding.top - padding.bottom;
-  const points = values.map((value, index) => {
-    const x = records.length === 1
-      ? padding.left + chartWidth / 2
-      : padding.left + (index / (records.length - 1)) * chartWidth;
-    const y = padding.top + ((max - value) / (max - min)) * chartHeight;
-    return { x, y, value, label: records[index].date };
-  });
-  const path = points.map((point, index) => `${index ? 'L' : 'M'} ${point.x} ${point.y}`).join(' ');
-  const area = points.length ? `${path} L ${points[points.length - 1].x} ${height - padding.bottom} L ${points[0].x} ${height - padding.bottom} Z` : '';
-
-  if (!records.length) {
-    return <div className="chart-empty"><Activity size={22} /><span>Guarda tu primer registro para ver aquí tu evolución.</span></div>;
-  }
-
-  return (
-    <div className="trend-chart">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Tendencia de rendimiento diario">
-        {[0, 50, 100].map((tick) => {
-          const y = padding.top + ((max - tick) / max) * chartHeight;
-          return (
-            <g key={tick}>
-              <line x1={padding.left} x2={width - padding.right} y1={y} y2={y} className="chart-grid-line" />
-              <text x="0" y={y + 4} className="chart-axis-label">{tick}</text>
-            </g>
-          );
-        })}
-        <path d={area} className="chart-area" />
-        <path d={path} className="chart-line" />
-        {points.map((point, index) => (
-          <g key={`${point.label}-${index}`}>
-            <circle cx={point.x} cy={point.y} r="4" className="chart-point" />
-            <text x={point.x} y={point.y - 11} textAnchor="middle" className="chart-value">{point.value}</text>
-            {(records.length < 8 || index === 0 || index === records.length - 1) && (
-              <text x={point.x} y={height - 7} textAnchor="middle" className="chart-axis-label">{point.label.slice(5)}</text>
-            )}
-          </g>
-        ))}
-      </svg>
-    </div>
-  );
-}
-
 function weatherDetails(weather) {
   if (!weather) return '';
   const details = [];
@@ -917,35 +963,41 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
+  const usernameAssignments = useRef(new Map());
   const [authError, setAuthError] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [adminClaimReady, setAdminClaimReady] = useState(false);
   const [adminEntryRequested, setAdminEntryRequested] = useState(false);
   const [showLogoutDialog, setShowLogoutDialog] = useState(false);
   const [logoutError, setLogoutError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [authMode, setAuthMode] = useState('login');
-  const [authName, setAuthName] = useState('');
+  const [authUsername, setAuthUsername] = useState('');
+  const [usernameSetupOpen, setUsernameSetupOpen] = useState(false);
+  const [usernameSetupValue, setUsernameSetupValue] = useState('');
+  const [usernameSetupPassword, setUsernameSetupPassword] = useState('');
+  const [usernameSetupPasswordConfirmation, setUsernameSetupPasswordConfirmation] = useState('');
+  const [usernameSetupError, setUsernameSetupError] = useState('');
+  const [usernameSetupLoading, setUsernameSetupLoading] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState('');
+  const [rememberSession, setRememberSession] = useState(true);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [legalDocument, setLegalDocument] = useState('');
+  const [pendingGoogleCredential, setPendingGoogleCredential] = useState(null);
   const [showCurtain, setShowCurtain] = useState(false);
   const [profile, setProfile] = useState(() => readStored(STORAGE_KEYS.profile, { name: 'Nicol', onboarded: false }));
+  const [showEventForm, setShowEventForm] = useState(false);
+  const [exerciseActivity, setExerciseActivity] = useState('');
+  const [exerciseMinutes, setExerciseMinutes] = useState('');
+  const [exerciseDate, setExerciseDate] = useState(localDate());
+  const [exerciseSessions, setExerciseSessions] = useState(() => readExerciseSessions(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name));
   const [tourStep, setTourStep] = useState(() => {
     const savedProfile = readStored(STORAGE_KEYS.profile, { name: 'Nicol', onboarded: false });
     return savedProfile.onboarded ? -1 : 0;
   });
-  const [actividad, setActividad] = useState('Desarrollo de plataformas web');
-  const [horas, setHoras] = useState(4);
-  const [animo, setAnimo] = useState(8);
-  const [comidaNombre, setComidaNombre] = useState('Pechuga a la plancha con arroz');
-  const [costoComida, setCostoComida] = useState(8.5);
-  const [ejercicio, setEjercicio] = useState('');
-  const [ejercicioCumplido, setEjercicioCumplido] = useState(false);
-  const [duracionEjercicio, setDuracionEjercicio] = useState(30);
-  const [intensidadEjercicio, setIntensidadEjercicio] = useState(3);
-  const [productividadEjercicio, setProductividadEjercicio] = useState(3);
-  const [gastoUSD, setGastoUSD] = useState(10);
   const [ciudad, setCiudad] = useState('Cusco');
   const [ingreso, setIngreso] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.income, 0));
   const [fixedCosts, setFixedCosts] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.fixedCosts, []));
@@ -1008,7 +1060,6 @@ export default function App() {
   const [habitDate, setHabitDate] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.habitDate, localDate()));
   const [events, setEvents] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.events, []));
   const [notifiedEvents, setNotifiedEvents] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.notifiedEvents, []));
-  const [history, setHistory] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.history, []));
   // Los gastos detallados se guardan junto a las finanzas locales para que el panel y el presupuesto compartan los mismos datos.
   const [expenses, setExpenses] = useState(() => readUserStored(readStored(STORAGE_KEYS.profile, { name: 'Nicol' }).name, STORAGE_KEYS.expenses, []));
   const [expenseName, setExpenseName] = useState('');
@@ -1017,13 +1068,10 @@ export default function App() {
   const [selectedWorkoutDay, setSelectedWorkoutDay] = useState(() => (new Date().getDay() + 6) % 7);
   const [selectedRecipeVideo, setSelectedRecipeVideo] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [dataApi, setDataApi] = useState(null);
   const [weatherApi, setWeatherApi] = useState(null);
   const [weatherRefresh, setWeatherRefresh] = useState(0);
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [weatherError, setWeatherError] = useState('');
-  const [apiError, setApiError] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
   const [notification, setNotification] = useState('');
   const dailyExpenses = expenses.filter((expense) => expense.date === localDate(today));
   const dailyExpenseTotal = dailyExpenses.reduce((total, expense) => total + (Number(expense.amount) || 0), 0);
@@ -1036,10 +1084,7 @@ export default function App() {
   const pendingHabits = habits.filter((habit) => !habit.complete);
   const completeCount = habits.filter((habit) => habit.complete).length;
   const completionRate = habits.length ? Math.round((completeCount / habits.length) * 100) : 0;
-  const latestScore = dataApi?.diagnostico?.score ?? history[history.length - 1]?.score;
-  const otherExpense = Number(dataApi?.finanzas?.gastoPEN || 0);
-  const foodExpense = Number(costoComida) || 0;
-  const expenseTotal = dailyExpenseTotal + (dataApi ? foodExpense + otherExpense : 0);
+  const expenseTotal = dailyExpenseTotal;
   const fixedCostTotal = fixedCosts.reduce((total, item) => total + (Number(item.amount) || 0), 0);
   const availableBudget = Number(ingreso) - fixedCostTotal
     - Math.max(Number(foodBudget) || 0, monthlyFoodExpenses)
@@ -1071,9 +1116,18 @@ export default function App() {
       action: () => { setSelectedDate(new Date(`${event.date}T12:00:00`)); setVista('calendario'); setNotificationsOpen(false); },
     })),
   ];
-  const averageScore = history.length
-    ? Math.round(history.reduce((total, item) => total + item.score, 0) / history.length)
-    : null;
+  const todaysExerciseSessions = exerciseSessions.filter((session) => session.date === localDate(today));
+  const todaysExerciseMinutes = todaysExerciseSessions.reduce((total, session) => total + (Number(session.minutes) || 0), 0);
+  const weeklyExerciseSummary = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 6 + index);
+    const dateKey = localDate(date);
+    return {
+      date: dateKey,
+      minutes: exerciseSessions
+        .filter((session) => session.date === dateKey)
+        .reduce((total, session) => total + (Number(session.minutes) || 0), 0),
+    };
+  });
   // Recomendaciones explicables que se calculan en el navegador; no se envían datos personales a una IA externa.
   const assistantInsight = availableBudget < 0
     ? 'Tus gastos asignados superan el presupuesto. Revisa las compras del mes y ajusta primero los montos flexibles.'
@@ -1081,14 +1135,13 @@ export default function App() {
       ? `Llevas ${currency(dailyExpenseTotal)} en compras hoy. Registrar cada categoría te ayuda a detectar en qué se va tu dinero.`
       : pendingHabits.length
         ? `Tu siguiente paso sencillo: completar “${pendingHabits[0].name}”. Un hábito pequeño también cuenta.`
-        : '¡Buen avance! Hoy completaste tus hábitos. Puedes cerrar el día con una nota en tu registro.';
+        : '¡Buen avance! Hoy completaste tus hábitos. Puedes planificar tu próxima comida o actividad.';
 
   useEffect(() => {
     if (!profile.accountId) return;
     const saved = [
       [STORAGE_KEYS.habits, habits],
       [STORAGE_KEYS.events, events],
-      [STORAGE_KEYS.history, history],
       [STORAGE_KEYS.income, ingreso],
       [STORAGE_KEYS.fixedCosts, fixedCosts],
       [STORAGE_KEYS.foodBudget, foodBudget],
@@ -1099,6 +1152,7 @@ export default function App() {
       [STORAGE_KEYS.expenses, expenses],
       [STORAGE_KEYS.habitDate, habitDate],
       [STORAGE_KEYS.generatedWorkouts, generatedWorkouts],
+      [STORAGE_KEYS.exerciseSessions, exerciseSessions],
     ];
     saved.forEach(([key, value]) => {
       try {
@@ -1112,7 +1166,7 @@ export default function App() {
     } catch (error) {
       console.error('No se pudo guardar el perfil de la cuenta en el almacenamiento local:', error);
     }
-  }, [habits, events, history, ingreso, fixedCosts, foodBudget, bodyProfile, workoutPreference, mealPlans, profile, notifiedEvents, expenses, habitDate, generatedWorkouts]);
+  }, [habits, events, ingreso, fixedCosts, foodBudget, bodyProfile, workoutPreference, mealPlans, profile, notifiedEvents, expenses, habitDate, generatedWorkouts, exerciseSessions]);
 
   useEffect(() => {
     const checkForNewDay = () => {
@@ -1261,11 +1315,11 @@ export default function App() {
     const userProfile = readUserStored(accountId, STORAGE_KEYS.profile, { name: demoUser.displayName, onboarded: true }, demoUser.displayName);
     const savedHabits = readUserStored(accountId, STORAGE_KEYS.habits, []);
     const savedBudget = readUserStored(accountId, STORAGE_KEYS.foodBudget, 0);
-    setProfile({ ...userProfile, name: userProfile.name || demoUser.displayName, accountId, email: demoUser.email, photoURL: demoUser.photoURL });
+    setProfile({ ...userProfile, name: userProfile.name || demoUser.displayName, username: '', accountId, email: demoUser.email, photoURL: demoUser.photoURL });
     setTourStep(userProfile.onboarded ? -1 : 0);
     setHabits(Array.isArray(savedHabits) ? savedHabits : []);
     setEvents(readUserStored(accountId, STORAGE_KEYS.events, []));
-    setHistory(readUserStored(accountId, STORAGE_KEYS.history, []));
+    setExerciseSessions(readExerciseSessions(accountId, demoUser.displayName));
     setIngreso(readUserStored(accountId, STORAGE_KEYS.income, 0));
     setFixedCosts(readUserStored(accountId, STORAGE_KEYS.fixedCosts, []));
     setFoodBudget(savedBudget);
@@ -1281,17 +1335,6 @@ export default function App() {
     setHabitDate(readUserStored(accountId, STORAGE_KEYS.habitDate, localDate()));
     setNotifiedEvents(readUserStored(accountId, STORAGE_KEYS.notifiedEvents, []));
     setExpenses(readUserStored(accountId, STORAGE_KEYS.expenses, []));
-    setActividad('Desarrollo de plataformas web');
-    setHoras(4);
-    setAnimo(8);
-    setComidaNombre('Pechuga a la plancha con arroz');
-    setCostoComida(8.5);
-    setEjercicio('');
-    setEjercicioCumplido(false);
-    setDuracionEjercicio(30);
-    setIntensidadEjercicio(3);
-    setProductividadEjercicio(3);
-    setGastoUSD(10);
     setCiudad('Cusco');
     setExpenseName('');
     setExpenseAmount('');
@@ -1325,9 +1368,11 @@ export default function App() {
     setSelectedRecipeVideo(0);
     setSelectedDate(new Date());
     setSelectedWorkoutDay((new Date().getDay() + 6) % 7);
-    setDataApi(null);
+    setShowEventForm(false);
+    setExerciseActivity('');
+    setExerciseMinutes('');
+    setExerciseDate(localDate());
     setWeatherApi(null);
-    setApiError('');
     setWorkoutRecommendationMessage('');
     setNotification('');
     setIsLoggedIn(true);
@@ -1344,11 +1389,11 @@ export default function App() {
     const userProfile = readAccountData(STORAGE_KEYS.profile, { name, onboarded: false });
     const savedHabits = readAccountData(STORAGE_KEYS.habits, []);
     const savedBudget = readAccountData(STORAGE_KEYS.foodBudget, 0);
-    setProfile({ ...userProfile, name, accountId, email: user.email || '', photoURL: user.photoURL || '' });
+    setProfile({ ...userProfile, name, username: '', accountId, email: user.email || '', photoURL: user.photoURL || '' });
     setTourStep(userProfile.onboarded ? -1 : 0);
     setHabits(Array.isArray(savedHabits) ? savedHabits : []);
     setEvents(readAccountData(STORAGE_KEYS.events, []));
-    setHistory(readAccountData(STORAGE_KEYS.history, []));
+    setExerciseSessions(readExerciseSessions(accountId, user.displayName || ''));
     setIngreso(readAccountData(STORAGE_KEYS.income, 0));
     setFixedCosts(readAccountData(STORAGE_KEYS.fixedCosts, []));
     setFoodBudget(savedBudget);
@@ -1364,17 +1409,6 @@ export default function App() {
     setHabitDate(readAccountData(STORAGE_KEYS.habitDate, localDate()));
     setNotifiedEvents(readAccountData(STORAGE_KEYS.notifiedEvents, []));
     setExpenses(readAccountData(STORAGE_KEYS.expenses, []));
-    setActividad('Desarrollo de plataformas web');
-    setHoras(4);
-    setAnimo(8);
-    setComidaNombre('Pechuga a la plancha con arroz');
-    setCostoComida(8.5);
-    setEjercicio('');
-    setEjercicioCumplido(false);
-    setDuracionEjercicio(30);
-    setIntensidadEjercicio(3);
-    setProductividadEjercicio(3);
-    setGastoUSD(10);
     setCiudad('Cusco');
     setExpenseName('');
     setExpenseAmount('');
@@ -1408,9 +1442,11 @@ export default function App() {
     setSelectedRecipeVideo(0);
     setSelectedDate(new Date());
     setSelectedWorkoutDay((new Date().getDay() + 6) % 7);
-    setDataApi(null);
+    setShowEventForm(false);
+    setExerciseActivity('');
+    setExerciseMinutes('');
+    setExerciseDate(localDate());
     setWeatherApi(null);
-    setApiError('');
     setWorkoutRecommendationMessage('');
     setNotification('');
     setIsLoggedIn(true);
@@ -1425,34 +1461,82 @@ export default function App() {
       setAuthError('');
       return undefined;
     }
-    getRedirectResult(auth).catch((error) => {
+    getRedirectResult(auth).then(async (result) => {
+      const username = window.sessionStorage.getItem('synclife-pending-username');
+      if (result?.user && username) {
+        try {
+          await assignUsername(result.user, username);
+        } catch (error) {
+          await signOut(auth);
+          throw error;
+        } finally {
+          window.sessionStorage.removeItem('synclife-pending-username');
+        }
+      } else {
+        window.sessionStorage.removeItem('synclife-pending-username');
+      }
+    }).catch((error) => {
+      window.sessionStorage.removeItem('synclife-pending-username');
       console.error('No se pudo completar el acceso redirigido de Google:', error);
-      setAuthError('No se pudo completar el acceso con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
+      if (error.code === 'auth/account-exists-with-different-credential') {
+        const credential = GoogleAuthProvider.credentialFromError(error);
+        if (credential) setPendingGoogleCredential(credential);
+        setAuthMode('login');
+        setAuthEmail(error.customData?.email || '');
+        setAuthError('Este correo ya tiene una cuenta con contraseña. Ingresa con esa contraseña una vez para vincular Google y después podrás usar ambos métodos con la misma cuenta.');
+      } else {
+        setAuthError(error.message || 'No se pudo completar el acceso con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
+      }
     });
     return onAuthStateChanged(auth, (user) => {
       if (user) {
         setAuthError('');
         setAdminClaimReady(false);
         enterWorkspace(user);
-        user.getIdTokenResult().then((tokenResult) => {
-          setIsAdmin(tokenResult.claims.admin === true);
+        accountRequest('/username', { user }).then(({ username }) => {
+          const assignedUsername = username || usernameAssignments.current.get(user.uid);
+          if (assignedUsername) {
+            setProfile((current) => ({ ...current, name: assignedUsername, username: assignedUsername }));
+            setUsernameSetupOpen(false);
+          } else {
+            setProfile((current) => ({ ...current, username: '' }));
+            setUsernameSetupOpen(true);
+          }
+        }).catch((error) => {
+          console.error('No se pudo consultar el nombre de usuario de la cuenta:', error);
+        });
+        const applyAdminClaims = async (forceRefresh) => {
+          const tokenResult = await user.getIdTokenResult(forceRefresh);
+          if (auth?.currentUser?.uid !== user.uid) return;
+          const admin = tokenResult.claims.admin === true;
+          setIsAdmin(admin);
+          setIsSuperAdmin(tokenResult.claims.superAdmin === true);
+          if (admin) setVista('admin');
           setAdminClaimReady(true);
-          syncAccountWithBackend(user).catch((error) => {
-            console.error('No se pudo sincronizar el usuario con la base de datos de Render:', error);
-            setNotification(`No se guardó la cuenta en la base de datos: ${error.message}`);
-          });
+        };
+        syncAccountWithBackend(user).then(() => applyAdminClaims(true)).catch((syncError) => {
+          console.error('No se pudo sincronizar el usuario con la base de datos de Render:', syncError);
+          setNotification(`No se sincronizó la cuenta con PostgreSQL: ${syncError.message}`);
+          return applyAdminClaims(true);
         }).catch((error) => {
           console.error('No se pudo comprobar el rol administrativo:', error);
           setIsAdmin(false);
+          setIsSuperAdmin(false);
           setAdminClaimReady(true);
           setAuthError('No se pudo comprobar el acceso administrativo. Vuelve a iniciar sesión.');
         });
       } else {
         setIsLoggedIn(false);
         setIsAdmin(false);
+        setIsSuperAdmin(false);
         setAdminClaimReady(true);
         setAdminEntryRequested(false);
         setShowCurtain(false);
+        setUsernameSetupOpen(false);
+        setUsernameSetupValue('');
+        setUsernameSetupPassword('');
+        setUsernameSetupPasswordConfirmation('');
+        setUsernameSetupError('');
         setNotificationsOpen(false);
         setTourStep(-1);
       }
@@ -1465,6 +1549,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (isAdmin && vista !== 'admin') setVista('admin');
     if (!isAdmin && vista === 'admin') setVista('inicio');
   }, [isAdmin, vista]);
 
@@ -1484,14 +1569,69 @@ export default function App() {
     setAdminClaimReady(false);
     try {
       const tokenResult = await auth.currentUser.getIdTokenResult(true);
-      setIsAdmin(tokenResult.claims.admin === true);
+      const admin = tokenResult.claims.admin === true;
+      setIsAdmin(admin);
+      setIsSuperAdmin(tokenResult.claims.superAdmin === true);
+      if (admin) setVista('admin');
       setAdminClaimReady(true);
       setAuthError('');
     } catch (error) {
       console.error('No se pudo actualizar el rol administrativo:', error);
       setAuthError('No se pudo comprobar tu rol. Vuelve a iniciar sesión.');
       setIsAdmin(false);
+      setIsSuperAdmin(false);
       setAdminClaimReady(true);
+    }
+  };
+
+  const assignUsername = async (user, username) => {
+    const result = await saveAccountUsername(user, username);
+    await updateProfile(user, { displayName: result.username });
+    usernameAssignments.current.set(user.uid, result.username);
+    setProfile((current) => ({ ...current, name: result.username, username: result.username }));
+    setUsernameSetupOpen(false);
+    return result.username;
+  };
+
+  const hasPasswordProvider = auth?.currentUser?.providerData.some((provider) => provider.providerId === 'password');
+
+  const submitUsernameSetup = async (event) => {
+    event.preventDefault();
+    const user = auth?.currentUser;
+    if (!user || !/^[a-zA-Z0-9._-]{3,24}$/.test(usernameSetupValue.trim())) {
+      setUsernameSetupError('Elige un nombre de usuario de 3 a 24 caracteres: letras, números, punto, guion o guion bajo.');
+      return;
+    }
+    if (!hasPasswordProvider && usernameSetupPassword.length < 6) {
+      setUsernameSetupError('Crea una contraseña de al menos 6 caracteres para poder iniciar con tu nombre de usuario.');
+      return;
+    }
+    if (!hasPasswordProvider && usernameSetupPassword !== usernameSetupPasswordConfirmation) {
+      setUsernameSetupError('Las contraseñas no coinciden.');
+      return;
+    }
+
+    setUsernameSetupLoading(true);
+    setUsernameSetupError('');
+    try {
+      if (!hasPasswordProvider) {
+        if (!user.email) throw new Error('Tu cuenta no tiene un correo asociado para agregar una contraseña.');
+        await linkWithCredential(user, EmailAuthProvider.credential(user.email, usernameSetupPassword));
+      }
+      const username = await assignUsername(user, usernameSetupValue.trim());
+      setUsernameSetupOpen(false);
+      setUsernameSetupPassword('');
+      setUsernameSetupPasswordConfirmation('');
+      setNotification(`Tu nombre de usuario es ${username}. Ya puedes usarlo para iniciar sesión.`);
+    } catch (error) {
+      console.error('No se pudo guardar el nombre de usuario de la cuenta:', error);
+      setUsernameSetupError(error.code === 'auth/email-already-in-use' || error.code === 'auth/credential-already-in-use'
+        ? 'Este correo ya tiene otra cuenta con contraseña. Inicia sesión con ese correo o usa Google como hasta ahora.'
+        : error.code === 'auth/operation-not-allowed'
+          ? 'Activa Correo electrónico/Contraseña en Firebase Authentication para poder añadir este método.'
+          : error.message || 'No se pudo guardar el nombre de usuario. Inténtalo otra vez.');
+    } finally {
+      setUsernameSetupLoading(false);
     }
   };
 
@@ -1500,24 +1640,45 @@ export default function App() {
       setAuthError('Configura Firebase en frontend/.env.local para habilitar el acceso con Google.');
       return;
     }
+    if (authMode === 'register' && !/^[a-zA-Z0-9._-]{3,24}$/.test(authUsername.trim())) {
+      setAuthError('Elige un nombre de usuario de 3 a 24 caracteres: letras, números, punto, guion o guion bajo.');
+      return;
+    }
+    if (authMode === 'register' && !acceptedTerms) {
+      setAuthError('Para crear tu cuenta, confirma que leíste los términos y la política de privacidad.');
+      return;
+    }
     setAuthLoading(true);
     setAuthError('');
     try {
+      await setPersistence(auth, rememberSession ? browserLocalPersistence : browserSessionPersistence);
       const provider = new GoogleAuthProvider();
       if (window.matchMedia('(max-width: 760px)').matches) {
+        if (authMode === 'register') {
+          window.sessionStorage.setItem('synclife-pending-username', authUsername.trim());
+        }
         await signInWithRedirect(auth, provider);
       } else {
-        await signInWithPopup(auth, provider);
+        const credential = await signInWithPopup(auth, provider);
+        if (authMode === 'register') {
+          try {
+            await assignUsername(credential.user, authUsername.trim());
+          } catch (error) {
+            await signOut(auth);
+            throw error;
+          }
+        }
       }
     } catch (error) {
       console.error('No se pudo iniciar sesión con Google:', error);
+      if (handleGoogleAccountConflict(error)) return;
       setAuthError(error.code === 'auth/popup-closed-by-user'
         ? 'Se cerró la ventana de Google antes de completar el acceso.'
         : error.code === 'auth/unauthorized-domain'
           ? 'Este dominio no está autorizado en Firebase Authentication.'
           : error.code === 'auth/popup-blocked'
             ? 'El navegador bloqueó la ventana de Google. Permite las ventanas emergentes e inténtalo otra vez.'
-            : 'No se pudo iniciar sesión con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
+            : error.message || 'No se pudo iniciar sesión con Google. Comprueba la configuración de Firebase e inténtalo otra vez.');
     } finally {
       setAuthLoading(false);
     }
@@ -1544,21 +1705,48 @@ export default function App() {
       setAuthError('La autenticación no está disponible. Comprueba la configuración de Firebase.');
       return;
     }
+    if (authMode === 'register' && !/^[a-zA-Z0-9._-]{3,24}$/.test(authUsername.trim())) {
+      setAuthError('Elige un nombre de usuario de 3 a 24 caracteres: letras, números, punto, guion o guion bajo.');
+      return;
+    }
     if (authMode === 'register' && authPassword !== authPasswordConfirmation) {
       setAuthError('Las contraseñas no coinciden.');
+      return;
+    }
+    if (authMode === 'register' && !acceptedTerms) {
+      setAuthError('Para crear tu cuenta, confirma que leíste los términos y la política de privacidad.');
       return;
     }
     setAuthLoading(true);
     setAuthError('');
     setAuthNotice('');
     try {
+      await setPersistence(auth, rememberSession ? browserLocalPersistence : browserSessionPersistence);
       if (authMode === 'register') {
         const credential = await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
-        const displayName = authName.trim();
-        if (displayName) await updateProfile(credential.user, { displayName });
+        try {
+          await assignUsername(credential.user, authUsername.trim());
+        } catch (error) {
+          await deleteUser(credential.user);
+          throw error;
+        }
         enterWorkspace(credential.user);
       } else {
-        await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        const identifier = authEmail.trim();
+        const credential = identifier.includes('@')
+          ? await signInWithEmailAndPassword(auth, identifier, authPassword)
+          : await (async () => {
+            const result = await accountRequest('/username/login', {
+              method: 'POST',
+              body: JSON.stringify({ username: identifier, password: authPassword }),
+            });
+            return signInWithCustomToken(auth, result.token);
+          })();
+        if (pendingGoogleCredential) {
+          await linkWithCredential(credential.user, pendingGoogleCredential);
+          setPendingGoogleCredential(null);
+          setAuthNotice('Google ya está vinculado. Desde ahora puedes entrar con Google o con tu contraseña.');
+        }
       }
     } catch (error) {
       console.error(`No se pudo ${authMode === 'register' ? 'crear la cuenta' : 'iniciar sesión'} con correo:`, error);
@@ -1574,7 +1762,7 @@ export default function App() {
                 ? 'Activa el proveedor Correo electrónico/Contraseña en Firebase Authentication.'
                 : error.code === 'auth/too-many-requests'
                   ? 'Hubo demasiados intentos. Espera un momento y vuelve a probar.'
-                  : 'No se pudo completar el acceso. Comprueba tu conexión e inténtalo otra vez.');
+                  : error.message || 'No se pudo completar el acceso. Comprueba tu conexión e inténtalo otra vez.');
     } finally {
       setAuthLoading(false);
     }
@@ -1585,7 +1773,7 @@ export default function App() {
       setAuthError('La autenticación no está disponible. Comprueba la configuración de Firebase.');
       return;
     }
-    if (!authEmail.trim()) {
+    if (!authEmail.trim() || !authEmail.includes('@')) {
       setAuthError('Escribe tu correo para enviarte el enlace de recuperación.');
       return;
     }
@@ -1613,6 +1801,8 @@ export default function App() {
     setAuthNotice('');
     setAuthPassword('');
     setAuthPasswordConfirmation('');
+    setAcceptedTerms(false);
+    if (mode !== 'login') setPendingGoogleCredential(null);
   };
 
   const switchUser = () => {
@@ -1689,7 +1879,7 @@ export default function App() {
     event.preventDefault();
     const amount = Number(expenseAmount);
     if (!expenseName.trim() || !Number.isFinite(amount) || amount <= 0) {
-      setApiError('Escribe el concepto y un monto válido para registrar el gasto.');
+      setNotification('Escribe el concepto y un monto válido para registrar el gasto.');
       return;
     }
     const expense = {
@@ -1702,7 +1892,6 @@ export default function App() {
     setExpenses((current) => [expense, ...current]);
     setExpenseName('');
     setExpenseAmount('');
-    setApiError('');
     setNotification(`Gasto registrado: ${expense.name} · ${currency(expense.amount)} (${expense.category}).`);
   };
 
@@ -1758,6 +1947,7 @@ export default function App() {
       retrievedAt: product.retrievedAt || null,
       productName: product.name,
       brand: product.brand,
+      searchMatch: product.searchMatch || 'partial',
       basis: portionGrams
         ? `Valores por 100 g ajustados a ${portionGrams} g.`
         : 'Valores de la API por 100 g; indica el peso en gramos para calcular tu porción.',
@@ -1796,7 +1986,7 @@ export default function App() {
         retrievedAt: result.retrievedAt,
       }));
       setMealNutritionMatches(matches);
-      if (!matches.length) throw new Error('FoodData Central no devolvió alimentos con datos nutricionales.');
+      if (!matches.length) throw new Error('No encontramos una coincidencia nutricional suficiente. Prueba con los ingredientes principales o ingresa los nutrientes manualmente.');
       selectNutritionMatch(matches[0], 0);
     } catch (error) {
       console.error('No se pudieron consultar los nutrientes de FoodData Central:', error);
@@ -1943,126 +2133,56 @@ export default function App() {
     return initialWorkouts.find((workout) => workout.day === day);
   };
 
-  const synchronize = async () => {
-    const payload = {
-      ciudad,
-      montoUSD: Number(gastoUSD),
-      comidaDetalle: comidaNombre,
-      costoComidaPEN: Number(costoComida),
-      animoValor: Number(animo),
-      horasEnfoque: Number(horas),
-      actividadNombre: actividad,
-      ejercicioCliente: ejercicioCumplido
-        ? `${ejercicio} · ${Number(duracionEjercicio) || 0} min · intensidad ${intensidadEjercicio}/5 · productividad percibida ${productividadEjercicio}/5`
-        : 'No realizó ejercicio hoy',
-      ejercitado: ejercicioCumplido,
+  const saveCalendarEvent = async (event) => {
+    event.preventDefault();
+    if (!eventoNombre.trim() || !eventoFecha) return;
+    const nextEvent = {
+      id: `${Date.now()}`,
+      name: eventoNombre.trim(),
+      date: eventoFecha,
+      status: statusSelect,
+      allDay: eventMode === 'allday',
+      start: horaIn,
+      end: horaOut,
     };
-
-    try {
-      const response = await fetch(apiUrl('/api/synclife/sync'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error || 'No se pudo sincronizar con el servidor.');
+    setEvents((current) => [...current.filter((item) => item.date !== eventoFecha || item.name !== nextEvent.name), nextEvent]);
+    setSelectedDate(new Date(`${eventoFecha}T12:00:00`));
+    setShowEventForm(false);
+    setEventoNombre('');
+    let reminderMessage = `${profile.name}, guardé "${nextEvent.name}" en tu calendario de este dispositivo.`;
+    const reminderTime = new Date(`${nextEvent.date}T${nextEvent.start}:00`);
+    const isReminderUpcoming = !nextEvent.allDay && reminderTime > new Date();
+    if (isReminderUpcoming && 'Notification' in window && Notification.permission === 'default') {
+      try {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') reminderMessage += ' Activa las notificaciones del navegador para recibir el aviso.';
+      } catch (error) {
+        console.error('No se pudo solicitar permiso para las notificaciones:', error);
+        reminderMessage += ' El recordatorio funcionará mientras la página esté abierta.';
       }
-
-      setDataApi(result);
-      setApiError('');
-      return result;
-    } catch (error) {
-      console.error('No se pudo conectar con el backend de SyncLife:', error);
-      const fallbackScore = Math.min(100, Math.max(15, (Number(payload.horasEnfoque) || 0) * 10 + (Number(payload.animoValor) || 0) * 2 + (Number(payload.ejercitado) ? 20 : 5) + (Number(payload.costoComidaPEN) <= 15 ? 20 : 10)));
-      const fallback = {
-        actividadNombre: payload.actividadNombre,
-        diagnostico: {
-          score: fallbackScore,
-          resumen: fallbackScore >= 80 ? 'Día de alto rendimiento y enfoque estratégico excelente.' : 'Día productivo estable con margen de mejora en gestión de tiempo.',
-        },
-        finanzas: {
-          montoUSD: Number(payload.montoUSD) || 0,
-          gastoPEN: ((Number(payload.montoUSD) || 0) * 3.75).toFixed(2),
-          tasa: 3.75,
-          source: 'estimación local',
-          stale: true,
-        },
-        clima: {
-          ciudad: payload.ciudad || 'Cusco',
-          temp: null,
-          source: 'sin conexión',
-          stale: true,
-        },
-        nutricion: {
-          alimento: payload.comidaDetalle || 'Comida del día',
-          calorias: 220,
-          source: 'estimación local',
-          stale: true,
-        },
-        serviciosDisponibles: false,
-      };
-
-      setDataApi(fallback);
-      setApiError('');
-      return fallback;
+    } else if (isReminderUpcoming && (!('Notification' in window) || Notification.permission !== 'granted')) {
+      reminderMessage += ' El recordatorio en pantalla funcionará mientras la página esté abierta.';
     }
+    setNotification(reminderMessage);
   };
 
-  const handleGuardar = async (event) => {
+  const saveExerciseSession = (event) => {
     event.preventDefault();
-    if (!actividad.trim() || !comidaNombre.trim()) {
-      setApiError('Completa la actividad y la comida antes de guardar.');
-      return;
-    }
-    setIsSaving(true);
-    setApiError('');
-    try {
-      if (eventoNombre.trim()) {
-        const nextEvent = {
-          id: `${Date.now()}`,
-          name: eventoNombre.trim(),
-          date: eventoFecha,
-          status: statusSelect,
-          allDay: eventMode === 'allday',
-          start: horaIn,
-          end: horaOut,
-        };
-        setEvents((current) => [...current.filter((item) => item.date !== eventoFecha || item.name !== nextEvent.name), nextEvent]);
-        setSelectedDate(new Date(`${eventoFecha}T12:00:00`));
-        let reminderMessage = `${profile.name}, guardé "${nextEvent.name}" en tu calendario de este dispositivo.`;
-        const reminderTime = new Date(`${nextEvent.date}T${nextEvent.start}:00`);
-        const isReminderUpcoming = !nextEvent.allDay && reminderTime > new Date();
-        if (isReminderUpcoming && 'Notification' in window && Notification.permission === 'default') {
-          const permission = await Notification.requestPermission();
-          if (permission !== 'granted') reminderMessage += ' Activa las notificaciones del navegador para recibir el aviso.';
-        } else if (isReminderUpcoming && (!('Notification' in window) || Notification.permission !== 'granted')) {
-          reminderMessage += ' El recordatorio en pantalla funcionará mientras la página esté abierta.';
-        }
-        setNotification(reminderMessage);
-      }
-      const result = await synchronize();
-      const record = {
-        date: localDate(),
-        score: Number(result.diagnostico.score),
-        exercise: ejercicioCumplido ? ejercicio : '',
-        exerciseMinutes: ejercicioCumplido ? Number(duracionEjercicio) || 0 : 0,
-        exerciseIntensity: ejercicioCumplido ? Number(intensidadEjercicio) : null,
-        exerciseProductivity: ejercicioCumplido ? Number(productividadEjercicio) : null,
-      };
-      setHistory((current) => [...current.filter((item) => item.date !== record.date), record].slice(-30));
-      trackAdminActivity('daily-record', record.date, { score: record.score }).catch((trackingError) => {
-        console.error('El registro quedó en este dispositivo, pero no se sincronizó con Firebase:', trackingError);
-        setNotification('El día se guardó en este dispositivo, pero no se pudo sincronizar con Firebase. Inténtalo nuevamente más tarde.');
-      });
-      setVista('analisis');
-    } catch (error) {
-      console.error('Error al guardar el registro diario:', error);
-      setApiError('No se pudo guardar el registro. Revisa la conexión y vuelve a intentarlo.');
-    } finally {
-      setIsSaving(false);
-    }
+    const minutes = Number(exerciseMinutes);
+    if (!exerciseActivity.trim() || !exerciseDate || !Number.isInteger(minutes) || minutes < 1 || minutes > 600) return;
+    const sessionId = `${Date.now()}`;
+    setExerciseSessions((current) => [
+      { id: sessionId, activity: exerciseActivity.trim(), minutes, date: exerciseDate },
+      ...current,
+    ]);
+    setNotification('Actividad física guardada en tu historial.');
+    trackAdminActivity('exercise', sessionId).catch((error) => {
+      console.error('No se pudo actualizar el conteo agregado de actividad física:', error);
+      setNotification('La actividad se guardó en este dispositivo, pero no se pudo actualizar el conteo administrativo.');
+    });
+    setExerciseActivity('');
+    setExerciseMinutes('');
+    setExerciseDate(localDate());
   };
 
   const descargarPDF = async () => {
@@ -2125,11 +2245,11 @@ export default function App() {
       y = 54;
 
       addSection('Resumen ejecutivo');
-      addParagraph(`Perfil: ${profile.name}  |  Fecha del registro: ${dateLabel(new Date(`${localDate()}T12:00:00`), { day: 'numeric', month: 'long', year: 'numeric' })}`);
-      addParagraph(`Puntaje de bienestar: ${dataApi?.diagnostico?.score ?? latestScore ?? 'Sin registro'} / 100`);
+      addParagraph(`Perfil: ${profile.name}  |  Fecha: ${dateLabel(new Date(`${localDate()}T12:00:00`), { day: 'numeric', month: 'long', year: 'numeric' })}`);
       addParagraph(`Presupuesto mensual: ${currency(ingreso)}  |  Disponible estimado: ${currency(availableBudget)}`);
       addParagraph(`Compras y otros gastos del mes: ${currency(monthlyExpenses)}  |  Compras registradas hoy: ${currency(dailyExpenseTotal)}`);
-      if (dataApi?.diagnostico?.resumen) addParagraph(`Lectura del día: ${dataApi.diagnostico.resumen}`);
+      addParagraph(`Actividad física de hoy: ${todaysExerciseMinutes} minutos en ${todaysExerciseSessions.length} sesión(es).`);
+      addParagraph(`Comidas planificadas para hoy: ${mealsToday.length}.`);
 
       addSection('Gastos registrados');
       if (expenses.length) {
@@ -2140,14 +2260,25 @@ export default function App() {
         addParagraph('No hay gastos diarios categorizados guardados.');
       }
 
-      addSection('Rutinas del día');
-      habits.forEach((habit) => addParagraph(`${habit.complete ? '[COMPLETADO]' : '[PENDIENTE]'}  ${habit.name} — ${habit.detail}`, 9));
-
-      addSection('Historial de rendimiento');
-      if (history.length) {
-        history.slice(-30).forEach((item) => addParagraph(`${item.date}  |  Puntaje: ${item.score}/100${item.exercise ? `  |  Ejercicio: ${item.exercise} (${item.exerciseMinutes} min)` : ''}`, 9));
+      addSection('Actividad física');
+      if (exerciseSessions.length) {
+        exerciseSessions.slice(0, 30).forEach((item) => addParagraph(`${item.date}  |  ${item.activity}  |  ${item.minutes} min`, 9));
       } else {
-        addParagraph('Aún no hay registros históricos guardados.');
+        addParagraph('Aún no hay actividades físicas guardadas.');
+      }
+
+      addSection('Plan de comidas');
+      if (mealPlans.length) {
+        mealPlans.slice(0, 30).forEach((item) => addParagraph(`${item.date}  |  ${mealTypeLabels[item.type] || item.type}  |  ${item.name}  |  ${currency(item.cost)}`, 9));
+      } else {
+        addParagraph('Aún no hay comidas planificadas.');
+      }
+
+      addSection('Hábitos');
+      if (habits.length) {
+        habits.forEach((habit) => addParagraph(`${habit.complete ? '[COMPLETADO]' : '[PENDIENTE]'}  ${habit.name} — ${habit.detail}`, 9));
+      } else {
+        addParagraph('Aún no hay hábitos guardados.');
       }
 
       const pageCount = pdf.getNumberOfPages();
@@ -2164,7 +2295,7 @@ export default function App() {
       pdf.save(`Reporte_SyncLife_${localDate()}.pdf`);
     } catch (error) {
       console.error('No se pudo generar el reporte PDF:', error);
-      setApiError('No se pudo generar el PDF. Inténtalo de nuevo.');
+      setNotification('No se pudo generar el PDF. Inténtalo de nuevo.');
     }
   };
 
@@ -2180,9 +2311,10 @@ export default function App() {
     setSelectedDate((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   };
 
-  const openRegistration = () => {
+  const openCalendarEventForm = () => {
     setEventoFecha(localDate(selectedDate));
-    setVista('registro');
+    setShowEventForm(true);
+    setVista('calendario');
   };
 
   const currentEvents = events.filter((event) => event.date === localDate(selectedDate));
@@ -2190,6 +2322,7 @@ export default function App() {
     Math.min(fixedCostDay(item), new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0).getDate()) === selectedDate.getDate()
   ));
   const currentMeals = mealPlans.filter((item) => item.date === localDate(selectedDate));
+  const currentExerciseSessions = exerciseSessions.filter((session) => session.date === localDate(selectedDate));
   const currentWorkout = workoutForDate(selectedDate);
   const activeWeeklyWorkouts = generatedWorkouts?.[workoutPreference];
   const selectedDayItems = [
@@ -2214,6 +2347,13 @@ export default function App() {
       detail: `${item.type} · ${currency(item.cost)}`,
       kind: 'meal',
     })),
+    ...currentExerciseSessions.map((session) => ({
+      id: `exercise-${session.id}`,
+      time: '07:00',
+      title: session.activity,
+      detail: `Actividad realizada · ${session.minutes} min`,
+      kind: 'workout',
+    })),
     ...(currentWorkout?.duration > 0 ? [{
       id: `workout-${currentWorkout.day}`,
       time: '07:00',
@@ -2225,6 +2365,7 @@ export default function App() {
   const hasCalendarItems = (date) => events.some((item) => item.date === localDate(date))
     || fixedCosts.some((item) => Math.min(fixedCostDay(item), new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate()) === date.getDate())
     || mealPlans.some((item) => item.date === localDate(date))
+    || exerciseSessions.some((session) => session.date === localDate(date))
     || workoutForDate(date)?.duration > 0;
   const monthLabel = dateLabel(selectedDate, { month: 'long', year: 'numeric' });
   const weekStart = new Date(today);
@@ -2270,15 +2411,14 @@ export default function App() {
     { id: 'calendario', label: 'Calendario', icon: CalendarDays },
     { id: 'bienestar', label: 'Bienestar', icon: Dumbbell },
     { id: 'finanzas', label: 'Finanzas', icon: Wallet },
-    { id: 'registro', label: 'Registro', icon: ClipboardList },
     { id: 'analisis', label: 'Análisis', icon: BarChart3 },
   ];
   const tourSteps = [
-    { title: `¡Hola, ${profile.name || 'Nicol'}!`, text: 'Este es tu espacio personal. Tu sesión se inicia con Google y tus datos se guardan por cuenta en este navegador.' },
+    { title: `¡Hola, ${profile.name || 'Nicol'}!`, text: 'Este es tu espacio personal. Puedes entrar con Google o con correo y contraseña; tus datos personales de uso se guardan en este navegador.' },
     { title: 'Tu panel de un vistazo', text: 'Desde el inicio puedes entrar al calendario, bienestar y finanzas; también verás un resumen del día.' },
-    { title: 'Registra ejercicio y enfoque', text: 'En Registro diario anota qué actividad hiciste, cuántos minutos, la intensidad y cómo sentiste tu productividad.' },
-    { title: 'Eventos y recordatorios', text: 'Añade un evento con hora. Si permites las notificaciones, recibirás un aviso personalizado mientras la página esté abierta.' },
-    { title: 'Analiza tu evolución', text: 'El análisis muestra tus registros y el diagnóstico actual. La productividad del ejercicio es tu autoevaluación, no una medición automática.' },
+    { title: 'Actividad física', text: 'Encuentra tus rutinas y guarda cada sesión de ejercicio en Bienestar.' },
+    { title: 'Eventos y recordatorios', text: 'Añade eventos desde Calendario. Si permites las notificaciones, recibirás un aviso mientras la página esté abierta.' },
+    { title: 'Analiza tu evolución', text: 'Consulta tus actividades, comidas, hábitos y gastos en Análisis.' },
   ];
   const backdropIcons = {
     inicio: LayoutDashboard,
@@ -2287,10 +2427,20 @@ export default function App() {
     'actividad-fisica': Activity,
     alimentacion: Salad,
     finanzas: Wallet,
-    registro: ClipboardList,
     analisis: BarChart3,
   };
   const ScreenBackdropIcon = backdropIcons[vista] || LayoutDashboard;
+
+  const handleGoogleAccountConflict = (error) => {
+    if (error.code !== 'auth/account-exists-with-different-credential') return false;
+    const credential = GoogleAuthProvider.credentialFromError(error);
+    if (credential) setPendingGoogleCredential(credential);
+    setAuthMode('login');
+    setAuthEmail(error.customData?.email || authEmail);
+    setAuthPassword('');
+    setAuthError('Este correo ya tiene una cuenta con contraseña. Ingresa con esa contraseña una vez para vincular Google y después podrás usar ambos métodos con la misma cuenta.');
+    return true;
+  };
 
   if (!isLoggedIn) {
     return (
@@ -2305,6 +2455,27 @@ export default function App() {
           <ShieldCheck size={16} /> Admin
         </button>
         <div className="login-layout">
+        <aside className="login-art-panel" aria-label="Bienestar en equilibrio">
+          <div className="login-art-glow" />
+          <div className="login-art-stars" aria-hidden="true" />
+          <div className="login-art-moon" aria-hidden="true" />
+          <div className="login-art-hill login-art-hill-back" aria-hidden="true" />
+          <div className="login-art-hill login-art-hill-front" aria-hidden="true" />
+          <div className="login-art-copy">
+            <img src="/synclife-logo.png" alt="" />
+            <span className="section-kicker">TU VIDA EN SINCRONÍA</span>
+            <h2>{authMode === 'register' ? <>Empieza a cuidarte<br />a tu manera.</> : <>Qué bueno tenerte<br />de vuelta.</>}</h2>
+            <p>Un espacio para avanzar a tu ritmo, celebrar tus pequeños pasos y construir hábitos que te hagan bien.</p>
+            <ul className="login-benefits">
+              <li><CheckCircle2 size={17} /><span>Organiza tus hábitos y tus días</span></li>
+              <li><CheckCircle2 size={17} /><span>Cuida tu bienestar con calma</span></li>
+              <li><CheckCircle2 size={17} /><span>Revisa tu progreso cuando quieras</span></li>
+            </ul>
+            <div className="login-welcome-note"><Sparkles size={16} /><span>Pequeños pasos, grandes cambios.</span></div>
+          </div>
+          <div className="login-art-orbit login-art-orbit-one" aria-hidden="true" />
+          <div className="login-art-orbit login-art-orbit-two" aria-hidden="true" />
+        </aside>
         <section className="login-card" aria-labelledby="login-title">
           <img className="login-logo" src="/synclife-logo.png" alt="Logo de SyncLife OS" />
           <span className="section-kicker">{authMode === 'register' ? 'ÚNETE A SYNCLIFE' : 'TU ESPACIO PERSONAL'}</span>
@@ -2319,27 +2490,30 @@ export default function App() {
           <form className="login-auth-form" onSubmit={submitEmailAuth}>
             {authMode === 'register' && (
               <label className="login-field">
-                <span>Nombre</span>
+                <span>Nombre de usuario</span>
                 <input
                   type="text"
-                  autoComplete="name"
-                  value={authName}
-                  onChange={(event) => setAuthName(event.target.value)}
-                  placeholder="Tu nombre"
-                  maxLength={80}
+                  autoComplete="username"
+                  value={authUsername}
+                  onChange={(event) => setAuthUsername(event.target.value)}
+                  placeholder="Ej. nicol2005"
+                  minLength={3}
+                  maxLength={24}
+                  pattern="[A-Za-z0-9._-]{3,24}"
                   required
                   disabled={!authReady || authLoading || !firebaseConfigured}
                 />
+                <small className="field-hint">Lo usarás para iniciar sesión y aparecerá en tu perfil.</small>
               </label>
             )}
             <label className="login-field">
-              <span>Correo electrónico</span>
+              <span>{authMode === 'register' ? 'Correo electrónico' : 'Correo o nombre de usuario'}</span>
               <input
-                type="email"
-                autoComplete="email"
+                type={authMode === 'register' ? 'email' : 'text'}
+                autoComplete={authMode === 'register' ? 'email' : 'username'}
                 value={authEmail}
                 onChange={(event) => setAuthEmail(event.target.value)}
-                placeholder="tu@correo.com"
+                placeholder={authMode === 'register' ? 'tu@correo.com' : 'tu@correo.com o tu usuario'}
                 required
                 disabled={!authReady || authLoading || !firebaseConfigured}
               />
@@ -2388,10 +2562,22 @@ export default function App() {
                 : (authMode === 'register' ? 'Crear cuenta' : 'Iniciar sesión')}
             </button>
           </form>
-          <div className="login-divider"><span>o continúa con</span></div>
+          {authMode === 'register' && (
+            <div className="login-terms-check">
+              <input id="login-terms-accepted" type="checkbox" checked={acceptedTerms} onChange={(event) => setAcceptedTerms(event.target.checked)} disabled={authLoading} />
+              <span><label htmlFor="login-terms-accepted">Confirmo que leí y acepto los</label>{' '}<button type="button" onClick={() => setLegalDocument('terms')}>Términos de uso</button>{' '}y la{' '}<button type="button" onClick={() => setLegalDocument('privacy')}>Política de privacidad</button>.</span>
+            </div>
+          )}
+          {authMode === 'login' && (
+            <label className="login-remember-check">
+              <input type="checkbox" checked={rememberSession} onChange={(event) => setRememberSession(event.target.checked)} disabled={authLoading} />
+              <span>Mantener mi sesión iniciada</span>
+            </label>
+          )}
+          <div className="login-divider"><span>o también puedes entrar con</span></div>
           <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
             <span className="google-mark" aria-hidden="true">G</span>
-            {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
+            {authLoading ? 'Conectando con Google…' : authMode === 'register' ? 'Crear cuenta con Google' : 'Entrar con Google'}
           </button>
           <p className="login-mode-switch">
             {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Eres nuevo?'}
@@ -2405,26 +2591,53 @@ export default function App() {
               Usar vista demo
             </button>
           )}
-          <small>Con Google o correo, tus datos de SyncLife se guardan por cuenta en este navegador.</small>
+          <small>Puedes entrar con correo y contraseña, nombre de usuario y contraseña o Google. Las cuentas antiguas pueden elegir un nombre de usuario después de iniciar sesión.</small>
         </section>
-        <aside className="login-art-panel" aria-label="Bienestar en equilibrio">
-            <div className="login-art-glow" />
-            <div className="login-art-stars" aria-hidden="true" />
-            <div className="login-art-moon" aria-hidden="true" />
-            <div className="login-art-hill login-art-hill-back" aria-hidden="true" />
-            <div className="login-art-hill login-art-hill-front" aria-hidden="true" />
-            <div className="login-art-copy">
-              <img src="/synclife-logo.png" alt="" />
-              <span className="section-kicker">SYNC YOUR LIFE</span>
-              <h2>Pequeños pasos,<br />grandes cambios.</h2>
-              <p>Un espacio para avanzar a tu ritmo y cuidar de ti cada día.</p>
-            </div>
-            <div className="login-art-orbit login-art-orbit-one" aria-hidden="true" />
-            <div className="login-art-orbit login-art-orbit-two" aria-hidden="true" />
-        </aside>
         </div>
+        <footer className="login-legal-footer">
+          <span>Al continuar, aceptas nuestros</span>
+          <button type="button" onClick={() => setLegalDocument('terms')}>Términos de uso</button>
+          <span>y</span>
+          <button type="button" onClick={() => setLegalDocument('privacy')}>Política de privacidad</button>
+          <span className="login-legal-copy">© {new Date().getFullYear()} SyncLife OS · Tu bienestar, a tu ritmo.</span>
+        </footer>
+        {legalDocument && (
+          <div className="login-legal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setLegalDocument(''); }}>
+            <section className="login-legal-dialog" role="dialog" aria-modal="true" aria-labelledby="login-legal-title">
+              <button type="button" className="login-legal-close" onClick={() => setLegalDocument('')} aria-label="Cerrar">×</button>
+              <span className="login-legal-kicker">SYNCLIFE OS</span>
+              <h2 id="login-legal-title">{legalDocument === 'terms' ? 'Términos de uso' : 'Política de privacidad'}</h2>
+              {legalDocument === 'terms' ? (
+                <div className="login-legal-body">
+                  <p><strong>Última actualización: 10 de noviembre de 2026.</strong> Texto informativo inicial; conviene revisarlo legalmente antes de presentarlo como aviso definitivo.</p>
+                  <p>SyncLife OS ofrece herramientas de organización personal para hábitos, bienestar, alimentación, finanzas y calendario. La información que muestra es orientativa y no sustituye el consejo de profesionales de salud o finanzas.</p>
+                  <p>Usa una cuenta propia, mantén segura tu contraseña y registra información veraz. Eres responsable de revisar los datos antes de guardar decisiones personales. No uses la aplicación para emergencias ni como servicio médico.</p>
+                  <p>Al crear una cuenta o iniciar sesión, aceptas usar el servicio de forma responsable. Puedes dejar de usarlo y cerrar sesión cuando quieras.</p>
+                </div>
+              ) : (
+                <div className="login-legal-body">
+                  <p><strong>Última actualización: 10 de noviembre de 2026.</strong> Texto informativo inicial; conviene revisarlo legalmente antes de presentarlo como aviso definitivo.</p>
+                  <p>Firebase Authentication gestiona el acceso. Si eliges Google, SyncLife recibe los datos básicos de perfil que autorizas, como correo y nombre. El identificador de cuenta, correo, nombre y rol pueden sincronizarse con el servidor de SyncLife.</p>
+                  <p>Los datos de hábitos, comidas, rutinas, finanzas, sesiones de ejercicio y calendario se guardan principalmente en este navegador. El servidor solo recibe conteos agregados de comidas, rutinas y sesiones, además de los datos básicos de la cuenta; no se envían allí tus datos de peso ni tus finanzas. Los registros diarios antiguos del panel administrativo se conservan, pero ya no se generan nuevos puntajes diarios.</p>
+                  <p>Las consultas de alimentos se envían a USDA FoodData Central a través del backend; la ciudad se envía al proveedor del clima al consultar el tiempo. Evita escribir información privada que no sea necesaria para esas funciones.</p>
+                  <p>Puedes borrar los datos locales desde el navegador; hacerlo no elimina tu cuenta de Firebase ni los registros que ya se sincronizaron con el servidor. Esta explicación resume el comportamiento actual de SyncLife OS y puede actualizarse si cambian sus funciones.</p>
+                </div>
+              )}
+              <button type="button" className="login-legal-accept" onClick={() => setLegalDocument('')}>Entendido</button>
+            </section>
+          </div>
+        )}
       </main>
     );
+  }
+
+  if (isLoggedIn && !adminClaimReady) {
+    return <main className="admin-loading admin-auth-loading" role="status">Verificando acceso seguro a SyncLife…</main>;
+  }
+
+  if (isAdmin && vista === 'admin') {
+    return <AdminPanel user={auth?.currentUser} isAdmin={isAdmin} isSuperAdmin={isSuperAdmin}
+      onRefreshClaim={refreshAdminClaim} onExit={confirmLogout} />;
   }
 
   return (
@@ -2490,6 +2703,7 @@ export default function App() {
         <div className="sidebar-bottom">
           <div className="avatar">{profile.photoURL ? <img src={profile.photoURL} alt="" /> : profile.name.charAt(0).toUpperCase()}</div>
           <div><strong>{profile.name}</strong><span>{profile.email || 'Cuenta Google'}</span></div>
+          {!profile.username && <button className="profile-edit" aria-label="Elegir nombre de usuario" data-tooltip="Elegir nombre de usuario" onClick={() => { setUsernameSetupError(''); setUsernameSetupOpen(true); }}><Pencil size={16} /></button>}
           <button className="profile-edit" aria-label="Repetir recorrido guiado" data-tooltip="Repetir recorrido guiado" onClick={() => setTourStep(0)}><HelpCircle size={16} /></button>
           <button className="profile-edit" aria-label="Cerrar sesión" data-tooltip="Cerrar sesión" onClick={switchUser}><LogOut size={16} /></button>
           <span className="online-dot" aria-label="En línea" />
@@ -2506,7 +2720,6 @@ export default function App() {
               'actividad-fisica': 'Actividad Física',
               alimentacion: 'Alimentación',
               finanzas: 'Tu dinero, con claridad',
-              registro: `${profile.name}, tu día con intención`,
               analisis: `Tu progreso, ${profile.name}`,
               admin: 'Panel administrativo',
             })[vista]}</h1>
@@ -2516,8 +2729,7 @@ export default function App() {
               'actividad-fisica': 'Organiza tus rutinas y preferencias de entrenamiento.',
               alimentacion: 'Planifica tus comidas y revisa tus recomendaciones.',
               finanzas: 'Planifica tu presupuesto mensual y anticipa tus próximos pagos.',
-              registro: 'Registra tu día para actualizar tu resumen personal.',
-              analisis: 'Consulta los datos de tus registros sincronizados.',
+              analisis: 'Consulta la actividad, alimentación, hábitos y gastos que guardas en cada sección.',
               admin: 'Indicadores agregados, cuentas y estado de servicios.',
             })[vista]}</p>
           </div>
@@ -2525,13 +2737,9 @@ export default function App() {
             <button className="admin-entry-button" type="button" onClick={openAdminEntry}>
               <ShieldCheck size={15} /> Admin
             </button>
-            <div
-              className="api-status"
-              title={dataApi?.serviciosDisponibles === false ? 'Backend no disponible. Se muestran cálculos locales aproximados; clima, tipo de cambio y nutrición no están sincronizados.' : undefined}
-              aria-label={dataApi?.serviciosDisponibles === false ? 'Modo simulación local. Datos externos no sincronizados.' : undefined}
-            >
-              <span className={`status-dot ${apiError ? 'is-error' : dataApi?.serviciosDisponibles === false ? 'is-simulated' : dataApi ? 'is-online' : ''}`} />
-              {apiError ? 'Revisar conexión' : dataApi?.serviciosDisponibles === false ? 'Modo simulación' : dataApi ? 'Datos sincronizados' : 'Listo para sincronizar'}
+            <div className="api-status" title={weatherError || undefined}>
+              <span className={`status-dot ${weatherError ? 'is-error' : weatherApi ? 'is-online' : ''}`} />
+              {weatherError ? 'Clima no disponible' : weatherLoading ? 'Consultando clima' : weatherApi ? 'Clima actualizado' : 'SyncLife listo'}
             </div>
             <button className="icon-button help-button" aria-label="Ver recorrido guiado" data-tooltip="Ver recorrido guiado" onClick={() => setTourStep(0)}><HelpCircle size={18} /></button>
             <button className="icon-button notification-button" aria-label="Notificaciones pendientes" aria-expanded={notificationsOpen} data-tooltip="Ver tareas y recordatorios pendientes" onClick={() => setNotificationsOpen((open) => !open)}>
@@ -2556,7 +2764,6 @@ export default function App() {
           </div>
         </header>
 
-        {apiError && dataApi?.serviciosDisponibles !== false && <div className="alert-banner" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Cerrar alerta">×</button></div>}
         {notification && <div className="toast-message" role="status">{notification}<button onClick={() => setNotification('')} aria-label="Cerrar notificación">×</button></div>}
         {showLogoutDialog && (
           <div className="logout-dialog-backdrop">
@@ -2574,11 +2781,38 @@ export default function App() {
             </section>
           </div>
         )}
-
-        {vista === 'admin' && isAdmin && (
-          <AdminPanel user={auth?.currentUser} isAdmin={isAdmin} onRefreshClaim={refreshAdminClaim}
-            onExit={switchUser} onBack={() => setVista('inicio')} />
+        {usernameSetupOpen && tourStep < 0 && (
+          <div className="username-setup-backdrop">
+            <form className="username-setup-dialog" role="dialog" aria-modal="true" aria-labelledby="username-setup-title" onSubmit={submitUsernameSetup}>
+              <span className="section-kicker">TU CUENTA SYNCLIFE</span>
+              <h2 id="username-setup-title">Elige cómo iniciar sesión</h2>
+              <p>Tu nombre de usuario será más fácil de recordar y aparecerá en tu perfil. También puedes seguir entrando con Google.</p>
+              {usernameSetupError && <p className="login-auth-error" role="alert">{usernameSetupError}</p>}
+              <label className="login-field">
+                <span>Nombre de usuario</span>
+                <input type="text" autoComplete="username" value={usernameSetupValue} onChange={(event) => setUsernameSetupValue(event.target.value)} minLength={3} maxLength={24} pattern="[A-Za-z0-9._-]{3,24}" placeholder="Ej. nicol2005" required disabled={usernameSetupLoading} />
+              </label>
+              {!hasPasswordProvider && (
+                <>
+                  <p className="field-hint">Para iniciar también con este nombre, crea una contraseña. Tu acceso con Google seguirá disponible.</p>
+                  <label className="login-field">
+                    <span>Crear contraseña</span>
+                    <input type="password" autoComplete="new-password" value={usernameSetupPassword} onChange={(event) => setUsernameSetupPassword(event.target.value)} minLength={6} required disabled={usernameSetupLoading} />
+                  </label>
+                  <label className="login-field">
+                    <span>Confirmar contraseña</span>
+                    <input type="password" autoComplete="new-password" value={usernameSetupPasswordConfirmation} onChange={(event) => setUsernameSetupPasswordConfirmation(event.target.value)} minLength={6} required disabled={usernameSetupLoading} />
+                  </label>
+                </>
+              )}
+              <div className="username-setup-actions">
+                <button type="button" className="logout-cancel-button" onClick={() => setUsernameSetupOpen(false)} disabled={usernameSetupLoading}>Ahora no</button>
+                <button type="submit" className="logout-confirm-button" disabled={usernameSetupLoading}>{usernameSetupLoading ? 'Guardando…' : 'Guardar nombre'}</button>
+              </div>
+            </form>
+          </div>
         )}
+
         {vista === 'inicio' && (
           <>
             <section className="module-shortcuts" aria-label="Módulos principales">
@@ -2606,9 +2840,9 @@ export default function App() {
             <section className="metric-card-grid">
               <article className="metric-box metric-primary">
                 <div className="metric-top"><span className="metric-icon blue"><Activity size={18} /></span><span className="metric-note">HOY</span></div>
-                <span className="metric-label">Rendimiento diario</span>
-                <div className="metric-val">{latestScore == null ? '—' : `${latestScore}`}<small>{latestScore == null ? 'Sin registro' : '/ 100'}</small></div>
-                <span className="metric-foot">{latestScore == null ? 'Guarda tu día para comenzar' : 'Puntaje de tu último registro'}</span>
+                <span className="metric-label">Actividad física</span>
+                <div className="metric-val">{todaysExerciseMinutes}<small> min</small></div>
+                <span className="metric-foot">{todaysExerciseSessions.length} sesión(es) guardadas</span>
               </article>
               <article className="metric-box">
                 <div className="metric-top"><span className="metric-icon violet"><Flame size={18} /></span><span className="metric-note">SEGUIMIENTO</span></div>
@@ -2624,9 +2858,9 @@ export default function App() {
               </article>
               <article className="metric-box">
                 <div className="metric-top"><span className="metric-icon amber"><CloudSun size={18} /></span><span className="metric-note">CLIMA LOCAL</span><button type="button" className="weather-refresh" onClick={() => setWeatherRefresh((current) => current + 1)} disabled={weatherLoading} aria-label="Actualizar clima" title="Actualizar clima"><RefreshCw size={14} /></button></div>
-                <span className="metric-label">{weatherApi?.ciudad || dataApi?.clima?.ciudad || ciudad}</span>
-                <div className="metric-val">{(weatherApi || dataApi?.clima)?.temp == null ? '—' : `${(weatherApi || dataApi.clima).temp}°`}<small>{(weatherApi || dataApi?.clima)?.temp == null ? (weatherLoading ? 'Consultando' : '') : 'C'}</small></div>
-                <span className="metric-foot">{weatherSummary(weatherApi || dataApi?.clima, weatherError, weatherLoading)}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span>
+                <span className="metric-label">{weatherApi?.ciudad || ciudad}</span>
+                <div className="metric-val">{weatherApi?.temp == null ? '—' : `${weatherApi.temp}°`}<small>{weatherApi?.temp == null ? (weatherLoading ? 'Consultando' : '') : 'C'}</small></div>
+                <span className="metric-foot">{weatherSummary(weatherApi, weatherError, weatherLoading)}{weatherApi?.stale ? ' · dato de respaldo' : ''}</span>
               </article>
             </section>
 
@@ -2655,7 +2889,7 @@ export default function App() {
                   <div className="field"><label htmlFor="habit-detail">Detalle (opcional)</label><input id="habit-detail" value={newHabitDetail} onChange={(event) => setNewHabitDetail(event.target.value)} placeholder="Ej. Beber 6 vasos durante el día" /></div>
                   <div className="habit-editor-actions"><button className="small-add" type="submit"><Plus size={15} /> {editingHabitId ? 'Guardar' : 'Agregar'}</button>{editingHabitId && <button className="text-action" type="button" onClick={cancelHabitEdit}>Cancelar</button>}</div>
                 </form>
-                <button className="text-action" onClick={() => setVista('registro')}>Registrar mi día <ChevronRight size={16} /></button>
+                <button className="text-action" onClick={() => setVista('actividad-fisica')}>Ver actividad física <ChevronRight size={16} /></button>
               </article>
 
               <article className="card daily-expense-panel">
@@ -2687,17 +2921,17 @@ export default function App() {
 
               <article className="card trend-panel">
                 <div className="section-heading">
-                  <div><span className="section-kicker">TUS DATOS, SIN SUPOSICIONES</span><h2><BarChart3 size={19} /> Tendencia de rendimiento</h2></div>
-                  <span className="period-tag">Últimos registros</span>
+                  <div><span className="section-kicker">MOVIMIENTO REGISTRADO</span><h2><BarChart3 size={19} /> Actividad de la semana</h2></div>
+                  <span className="period-tag">Minutos por día</span>
                 </div>
-                <div className="chart-legend"><span><i /> Puntaje diario</span>{averageScore != null && <span>Promedio: <strong>{averageScore}</strong></span>}</div>
-                <TrendChart records={history.slice(-7)} />
+                <div className="chart-legend"><span><i /> Minutos de ejercicio</span></div>
+                <BarChart records={weeklyExerciseSummary} />
               </article>
 
               <article className="card calendar-panel">
                 <div className="section-heading">
                   <div><span className="section-kicker">PLANIFICACIÓN</span><h2><CalendarDays size={19} /> Calendario</h2></div>
-                  <button className="small-add" onClick={openRegistration}><Plus size={15} /> Evento</button>
+                  <button className="small-add" onClick={openCalendarEventForm}><Plus size={15} /> Evento</button>
                 </div>
                 <div className="calendar-nav">
                   <button className="calendar-arrow" onClick={() => changeMonth(-1)} aria-label="Mes anterior"><ChevronLeft size={17} /></button>
@@ -2726,7 +2960,7 @@ export default function App() {
                   })}
                 </div>
                 <div className="selected-day-events">
-                  <div className="event-date-heading"><span>{dateLabel(selectedDate, { weekday: 'short', day: 'numeric', month: 'short' })}</span><button onClick={openRegistration}><Plus size={15} /> Añadir</button></div>
+                  <div className="event-date-heading"><span>{dateLabel(selectedDate, { weekday: 'short', day: 'numeric', month: 'short' })}</span><button onClick={openCalendarEventForm}><Plus size={15} /> Añadir</button></div>
                   {currentEvents.length ? currentEvents.map((item) => (
                     <div className={`event-row event-${item.status}`} key={item.id}>
                       <span className="event-marker" /><div><strong>{item.name}</strong><small>{item.allDay ? 'Todo el día' : `${item.start} — ${item.end}`}</small></div>
@@ -2792,7 +3026,7 @@ export default function App() {
             <article className="card full-calendar-card">
               <div className="section-heading">
                 <div><span className="section-kicker">AGENDA INTEGRADA</span><h2><CalendarDays size={19} /> {monthLabel}</h2></div>
-                <button className="small-add" onClick={openRegistration}><Plus size={15} /> Nuevo evento</button>
+                <button className="small-add" onClick={openCalendarEventForm}><Plus size={15} /> Nuevo evento</button>
               </div>
               <div className="calendar-nav">
                 <button className="calendar-arrow" onClick={() => changeMonth(-1)} aria-label="Mes anterior"><ChevronLeft size={17} /></button>
@@ -2826,11 +3060,11 @@ export default function App() {
               <article className="card day-timeline">
                 <div className="section-heading">
                   <div><span className="section-kicker">DÍA SELECCIONADO</span><h2>{dateLabel(selectedDate, { weekday: 'long', day: 'numeric', month: 'long' })}</h2></div>
-                  <button className="small-add" onClick={openRegistration}><Plus size={15} /> Añadir</button>
+                  <button className="small-add" onClick={openCalendarEventForm}><Plus size={15} /> Añadir</button>
                 </div>
                 <div className="day-weather">
                   <CloudSun size={20} />
-                  <div><strong>{(weatherApi || dataApi?.clima) ? `${(weatherApi || dataApi.clima).temp == null ? '—' : `${(weatherApi || dataApi.clima).temp}°C`} · ${(weatherApi || dataApi.clima).ciudad}` : `Clima de ${ciudad}`}</strong><span>{weatherSummary(weatherApi || dataApi?.clima, weatherError, weatherLoading)}{(weatherApi || dataApi?.clima)?.stale ? ' · dato de respaldo' : ''}</span></div>
+                  <div><strong>{weatherApi ? `${weatherApi.temp == null ? '—' : `${weatherApi.temp}°C`} · ${weatherApi.ciudad}` : `Clima de ${ciudad}`}</strong><span>{weatherSummary(weatherApi, weatherError, weatherLoading)}{weatherApi?.stale ? ' · dato de respaldo' : ''}</span></div>
                   <button type="button" className="weather-refresh" onClick={() => setWeatherRefresh((current) => current + 1)} disabled={weatherLoading} aria-label="Actualizar clima" title="Actualizar clima"><RefreshCw size={14} /></button>
                 </div>
                 <div className="timeline-list">
@@ -2841,6 +3075,22 @@ export default function App() {
                     </div>
                   )) : <p className="no-events">No hay actividades planificadas para este día.</p>}
                 </div>
+                {showEventForm && (
+                  <form className="calendar-event-form" onSubmit={saveCalendarEvent}>
+                    <div className="section-heading"><h3>Nuevo evento</h3><button type="button" className="text-action" onClick={() => setShowEventForm(false)}>Cancelar</button></div>
+                    <div className="field"><label htmlFor="calendar-event-name">Nombre</label><input id="calendar-event-name" value={eventoNombre} onChange={(event) => setEventoNombre(event.target.value)} placeholder="Ej. Cita médica" required /></div>
+                    <div className="form-grid">
+                      <div className="field"><label htmlFor="calendar-event-date">Fecha</label><input id="calendar-event-date" type="date" value={eventoFecha} onChange={(event) => setEventoFecha(event.target.value)} required /></div>
+                      <div className="field"><label htmlFor="calendar-event-status">Estado</label><select id="calendar-event-status" value={statusSelect} onChange={(event) => setStatusSelect(event.target.value)}><option value="amber">En proceso</option><option value="green">Completado</option><option value="red">Pendiente</option></select></div>
+                      <div className="field field-wide"><label htmlFor="calendar-event-mode">Horario</label><select id="calendar-event-mode" value={eventMode} onChange={(event) => setEventMode(event.target.value)}><option value="horas">Horario específico</option><option value="allday">Todo el día</option></select></div>
+                      {eventMode === 'horas' && <>
+                        <div className="field"><label htmlFor="calendar-event-start">Inicio</label><input id="calendar-event-start" type="time" value={horaIn} onChange={(event) => setHoraIn(event.target.value)} /></div>
+                        <div className="field"><label htmlFor="calendar-event-end">Fin</label><input id="calendar-event-end" type="time" value={horaOut} onChange={(event) => setHoraOut(event.target.value)} /></div>
+                      </>}
+                    </div>
+                    <button className="btn-flow" type="submit"><Plus size={16} /> Guardar evento</button>
+                  </form>
+                )}
               </article>
               <article className="card upcoming-panel">
                 <div className="section-heading"><div><span className="section-kicker">PRÓXIMOS 7 DÍAS</span><h2><Bell size={18} /> Vencimientos</h2></div></div>
@@ -2912,6 +3162,27 @@ export default function App() {
                   </div>
                 </>
               )}
+              <section className="exercise-session-panel">
+                <div className="section-heading">
+                  <div><span className="section-kicker">TU MOVIMIENTO</span><h2><Activity size={19} /> Guardar actividad realizada</h2></div>
+                </div>
+                <p className="section-description">Anota el ejercicio que hiciste y el tiempo. Tus sesiones también aparecerán en el calendario.</p>
+                <form className="exercise-session-form" onSubmit={saveExerciseSession}>
+                  <div className="field"><label htmlFor="exercise-session-name">Actividad</label><input id="exercise-session-name" value={exerciseActivity} onChange={(event) => setExerciseActivity(event.target.value)} placeholder="Ej. Caminata, bicicleta o yoga" required /></div>
+                  <div className="field"><label htmlFor="exercise-session-minutes">Duración (minutos)</label><input id="exercise-session-minutes" type="number" min="1" max="600" step="1" value={exerciseMinutes} onChange={(event) => setExerciseMinutes(event.target.value)} placeholder="30" required /></div>
+                  <div className="field"><label htmlFor="exercise-session-date">Fecha</label><input id="exercise-session-date" type="date" value={exerciseDate} onChange={(event) => setExerciseDate(event.target.value)} required /></div>
+                  <button className="btn-flow" type="submit"><Plus size={16} /> Guardar actividad</button>
+                </form>
+                <div className="exercise-session-list">
+                  {exerciseSessions.length ? exerciseSessions.slice(0, 5).map((session) => (
+                    <div className="exercise-session-row" key={session.id}>
+                      <span><strong>{session.activity}</strong><small>{dateLabel(new Date(`${session.date}T12:00:00`), { weekday: 'short', day: 'numeric', month: 'short' })}</small></span>
+                      <strong>{session.minutes} min</strong>
+                      <button type="button" aria-label={`Eliminar actividad ${session.activity}`} onClick={() => setExerciseSessions((current) => current.filter((item) => item.id !== session.id))}><Trash2 size={15} /></button>
+                    </div>
+                  )) : <p className="no-events">Aún no hay sesiones guardadas. Se mostrarán aquí después de agregarlas.</p>}
+                </div>
+              </section>
               <EmbeddedVideoCarousel
                 title={`Movimiento · ${weekdays[selectedWorkoutDay]}`}
                 videos={workoutVideos}
@@ -2975,7 +3246,7 @@ export default function App() {
               </section>
               <div className="meal-step-heading">
                 <span className="meal-step-number">1</span>
-                <div><h3>Elige la categoría</h3><p>Selecciona el tipo de comida y completa sus datos en el formulario de registro.</p></div>
+                <div><h3>Elige la categoría</h3><p>Selecciona el tipo de comida y completa sus datos en esta sección.</p></div>
               </div>
               <div className="meal-category-buttons" role="group" aria-label="Categoría de comida">
                 {mealTypes.map((type) => (
@@ -3014,14 +3285,14 @@ export default function App() {
                 <div className="field"><label htmlFor="meal-cost">Costo estimado del plato (PEN)</label><input id="meal-cost" type="number" min="0" step="0.1" value={mealCost} onChange={(event) => setMealCost(event.target.value)} placeholder="0.00" required /></div>
                 <details className="meal-nutrition-details" open>
                   <summary><Activity size={15} /> Consultar nutrientes o ingresarlos manualmente</summary>
-                  <p>Los datos provienen de USDA FoodData Central. Si no indicas un peso en gramos o kilogramos, se muestran por 100 g; el resultado es un alimento de referencia, no una receta exacta.</p>
+                  <p>Piensa en «Almuerzo» como una carpeta: la búsqueda consulta lo que escribas en «Alimento o plato». USDA devuelve alimentos de referencia, no calcula recetas; en platos mixtos, revisa que coincidan los ingredientes principales. Si no aparece un resultado adecuado, puedes ingresar los nutrientes manualmente.</p>
                   <button className="estimate-nutrients-button" type="button" onClick={searchMealNutrition} disabled={isSearchingMealNutrition || !mealName.trim()}>
                     <Activity size={15} /> {isSearchingMealNutrition ? 'Buscando…' : 'Consultar API nutricional'}
                   </button>
                   {mealNutritionError && <p className="nutrition-estimate-message is-error" role="alert">{mealNutritionError}</p>}
                   {mealNutritionMatches.length > 0 && (
                     <div className="field">
-                      <label htmlFor="nutrition-product-match">Producto encontrado</label>
+                      <label htmlFor="nutrition-product-match">Alimento o plato de referencia encontrado</label>
                       <select id="nutrition-product-match" value={selectedNutritionMatchIndex} onChange={(event) => {
                         const index = Number(event.target.value);
                         if (Number.isInteger(index) && mealNutritionMatches[index]) {
@@ -3029,14 +3300,14 @@ export default function App() {
                         }
                       }}>
                         {mealNutritionMatches.map((product, index) => (
-                          <option key={product.key} value={index}>{product.name}{product.brand ? ` · ${product.brand}` : ''}</option>
+                          <option key={product.key} value={index}>{product.name}{product.searchMatch === 'complete' ? ' · Coincidencia de ingredientes' : ' · Coincidencia parcial'}</option>
                         ))}
                       </select>
                     </div>
                   )}
                   {mealNutritionEstimate && (
                     <div className="nutrition-estimate-message" role="status">
-                      Datos de {mealNutritionEstimate.source}: <strong>{mealNutritionEstimate.productName}</strong>{mealNutritionEstimate.brand ? ` (${mealNutritionEstimate.brand})` : ''}. Los nutrientes que la fuente no publica quedan vacíos. {mealNutritionEstimate.basis}
+                      Referencia de {mealNutritionEstimate.source}: <strong>{mealNutritionEstimate.productName}</strong>{mealNutritionEstimate.searchMatch === 'partial' ? '. Es una coincidencia parcial; confirma que se parezca a tu plato.' : '. Coinciden los ingredientes principales.'} Los nutrientes que la fuente no publica quedan vacíos. {mealNutritionEstimate.basis}
                     </div>
                   )}
                   <div className="nutrition-facts">
@@ -3163,143 +3434,31 @@ export default function App() {
           </section>
         )}
 
-        {vista === 'registro' && (
-          <form className="registration-layout" onSubmit={handleGuardar}>
-            <section className="card registration-form">
-              <div className="section-heading">
-                <div><span className="section-kicker">REGISTRO DIARIO</span><h2><ClipboardList size={19} /> Tu bienestar en un solo lugar</h2></div>
-                <span className="local-tag">Sincronización segura</span>
-              </div>
-              <p className="section-description">Al guardar, SyncLife consulta las APIs de clima, conversión de moneda y nutrición, y registra tu resumen diario.</p>
-
-              <div className="form-section">
-                <h3><Target size={17} /> Enfoque y movimiento</h3>
-                <div className="form-grid">
-                  <div className="field field-wide"><label htmlFor="activity">Actividad principal</label><input id="activity" value={actividad} onChange={(event) => setActividad(event.target.value)} required /></div>
-                  <div className="field"><label htmlFor="hours">Horas de enfoque</label><input id="hours" type="number" min="0" max="24" step="0.5" value={horas} onChange={(event) => setHoras(event.target.value)} /></div>
-                  <div className="field"><label htmlFor="mood">Ánimo de hoy (1–10)</label><input id="mood" type="number" min="1" max="10" value={animo} onChange={(event) => setAnimo(event.target.value)} /></div>
-                </div>
-              </div>
-
-              <div className="form-section exercise-section">
-                <h3><Dumbbell size={17} /> Ejercicio <span className="optional-label">opcional</span></h3>
-                <label className={`exercise-check ${ejercicioCumplido ? 'checked' : ''}`}>
-                  <input type="checkbox" checked={ejercicioCumplido} onChange={(event) => setEjercicioCumplido(event.target.checked)} />
-                  <span className="habit-check">{ejercicioCumplido && <Check size={14} />}</span>
-                  <span><strong>¿Hiciste ejercicio hoy?</strong><small>Marca esta casilla para registrar tu sesión.</small></span>
-                </label>
-                {ejercicioCumplido ? (
-                  <div className="exercise-entry">
-                    <div className="exercise-entry-heading">
-                      <strong>Cuéntame qué hiciste</strong>
-                      <span>Tu registro se guardará en tu historial</span>
-                    </div>
-                    <div className="field">
-                      <label htmlFor="exercise">¿Qué ejercicios o actividad realizaste?</label>
-                      <textarea
-                        id="exercise"
-                        value={ejercicio}
-                        onChange={(event) => setEjercicio(event.target.value)}
-                        placeholder="Por ejemplo: 20 min de bicicleta y 3 series de 12 sentadillas"
-                        required={ejercicioCumplido}
-                        rows={3}
-                      />
-                      <small className="field-hint">Puedes anotar el tipo de ejercicio, ejercicios, series o distancia.</small>
-                    </div>
-                    <div className="form-grid">
-                      <div className="field"><label htmlFor="exercise-duration">¿Cuánto tiempo? (minutos)</label><input id="exercise-duration" type="number" min="1" max="600" value={duracionEjercicio} onChange={(event) => setDuracionEjercicio(event.target.value)} required={ejercicioCumplido} /></div>
-                      <div className="field"><label htmlFor="exercise-intensity">¿Qué intensidad tuvo? (1–5)</label><select id="exercise-intensity" value={intensidadEjercicio} onChange={(event) => setIntensidadEjercicio(event.target.value)}><option value="1">1 · Suave</option><option value="2">2 · Ligera</option><option value="3">3 · Moderada</option><option value="4">4 · Intensa</option><option value="5">5 · Muy intensa</option></select></div>
-                      <div className="field field-wide"><label htmlFor="exercise-productivity">¿Cómo sentiste tu sesión? (1–5)</label><select id="exercise-productivity" value={productividadEjercicio} onChange={(event) => setProductividadEjercicio(event.target.value)}><option value="1">1 · Me costó mucho avanzar</option><option value="2">2 · Avancé un poco</option><option value="3">3 · Sesión normal</option><option value="4">4 · Buena sesión</option><option value="5">5 · Excelente, cumplí mi objetivo</option></select><small className="field-hint">Es tu autoevaluación; no cambia el puntaje calculado por el backend.</small></div>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="exercise-empty">Activa la casilla cuando quieras anotar una actividad. No se registrará ejercicio si la dejas desmarcada.</p>
-                )}
-              </div>
-
-              <div className="form-section">
-                <h3><Utensils size={17} /> Alimentación</h3>
-                <div className="form-grid">
-                  <div className="field"><label htmlFor="meal">Comida del día</label><input id="meal" value={comidaNombre} onChange={(event) => setComidaNombre(event.target.value)} required /></div>
-                  <div className="field"><label htmlFor="food-cost">Costo de comida (PEN)</label><input id="food-cost" type="number" min="0" step="0.01" value={costoComida} onChange={(event) => setCostoComida(event.target.value)} /></div>
-                </div>
-              </div>
-
-              <div className="form-section">
-                <h3><Wallet size={17} /> Finanzas y ubicación</h3>
-                <div className="form-grid">
-                  <div className="field"><label htmlFor="usd-spend">Gasto adicional (USD)</label><input id="usd-spend" type="number" min="0" step="0.01" value={gastoUSD} onChange={(event) => setGastoUSD(event.target.value)} /></div>
-                  <div className="field"><label htmlFor="city">Ciudad para consultar clima</label><div className="input-icon"><MapPin size={16} /><input id="city" value={ciudad} onChange={(event) => setCiudad(event.target.value)} /></div></div>
-                  <div className="field"><label htmlFor="income">Ingreso mensual (PEN)</label><input id="income" type="number" min="0" step="0.01" value={ingreso} onChange={(event) => setIngreso(event.target.value)} /></div>
-                </div>
-              </div>
-
-              <div className="form-section event-form-section">
-                <h3><CalendarDays size={17} /> Evento del calendario <span className="optional-label">opcional</span></h3>
-                <div className="form-grid">
-                  <div className="field"><label htmlFor="event-name">Nombre del evento</label><input id="event-name" placeholder="Ej. Revisión de proyecto" value={eventoNombre} onChange={(event) => setEventoNombre(event.target.value)} /></div>
-                  <div className="field"><label htmlFor="event-date">Fecha</label><input id="event-date" type="date" value={eventoFecha} onChange={(event) => setEventoFecha(event.target.value)} /></div>
-                  <div className="field"><label htmlFor="event-status">Estado de la actividad</label><select id="event-status" value={statusSelect} onChange={(event) => setStatusSelect(event.target.value)}><option value="amber">En proceso</option><option value="green">Completado</option><option value="red">Pendiente / incumplido</option></select></div>
-                  <div className="field"><label htmlFor="event-mode">Duración</label><select id="event-mode" value={eventMode} onChange={(event) => setEventMode(event.target.value)}><option value="horas">Horario específico</option><option value="allday">Todo el día</option></select></div>
-                  {eventMode === 'horas' && <><div className="field"><label htmlFor="event-start">Hora de inicio</label><input id="event-start" type="time" value={horaIn} onChange={(event) => setHoraIn(event.target.value)} /></div><div className="field"><label htmlFor="event-end">Hora de fin</label><input id="event-end" type="time" value={horaOut} onChange={(event) => setHoraOut(event.target.value)} /></div></>}
-                </div>
-              </div>
-              <button className="btn-flow" type="submit" disabled={isSaving}><Save size={17} />{isSaving ? 'Sincronizando...' : 'Guardar día y actualizar estadísticas'}</button>
-            </section>
-
-            <aside className="registration-aside">
-              <section className="card api-card">
-                <span className="api-card-icon"><Sparkles size={20} /></span>
-                <span className="section-kicker">SYNC LIFE INTELLIGENCE</span>
-                <h3>Un panorama más completo de tu día.</h3>
-                <p>Al guardar, estas fuentes ayudan a enriquecer tu resumen:</p>
-                <ul>
-                  <li><CloudSun size={16} /><span><strong>Open-Meteo</strong><small>Proveedor principal del clima</small></span><CheckCircle2 size={15} /></li>
-                  <li><CloudSun size={16} /><span><strong>wttr.in</strong><small>Proveedor alternativo automático</small></span><CheckCircle2 size={15} /></li>
-                  <li><CircleDollarSign size={16} /><span><strong>Tipo de cambio</strong><small>ExchangeRate-API con respaldo Frankfurter</small></span><CheckCircle2 size={15} /></li>
-                  <li><Salad size={16} /><span><strong>USDA FoodData Central</strong><small>Información nutricional</small></span><CheckCircle2 size={15} /></li>
-                </ul>
-              </section>
-              <section className="card preview-card">
-                <span className="section-kicker">RESUMEN RÁPIDO</span>
-                <div className="preview-item"><Clock3 size={17} /><span>Enfoque estimado</span><strong>{Number(horas) || 0} h</strong></div>
-                <div className="preview-item"><Dumbbell size={17} /><span>Ejercicio</span><strong className={ejercicioCumplido ? 'text-green' : 'text-amber'}>{ejercicioCumplido ? `${duracionEjercicio} min` : 'No registrado'}</strong></div>
-                {ejercicioCumplido && <div className="preview-item"><Star size={17} /><span>Productividad percibida</span><strong>{productividadEjercicio}/5</strong></div>}
-                <div className="preview-item"><ArrowDownRight size={17} /><span>Gasto conocido</span><strong>{currency(foodExpense)}</strong></div>
-              </section>
-            </aside>
-          </form>
-        )}
-
         {vista === 'analisis' && (
           <section className="analysis-view">
-            {!dataApi ? (
-              <div className="card empty-analysis"><BarChart3 size={30} /><h2>Aún no hay un registro sincronizado</h2><p>Guarda tu día para consultar las métricas calculadas por las APIs.</p><button className="btn-flow" onClick={() => setVista('registro')}>Ir al registro diario <ChevronRight size={17} /></button></div>
-            ) : (
-              <>
-                <div className="metric-card-grid analysis-metrics">
-                  <article className="metric-box"><span className="metric-label">Puntaje de hoy</span><div className="metric-val">{dataApi.diagnostico.score}<small>/ 100</small></div><span className="metric-foot">Rendimiento personal estimado</span></article>
-                  <article className="metric-box"><span className="metric-label">Gasto convertido</span><div className="metric-val metric-money">{currency(dataApi.finanzas.gastoPEN)}</div><span className="metric-foot">{Number(gastoUSD) || 0} USD · {dataApi.finanzas.source || 'tipo de cambio no identificado'}{dataApi.finanzas.stale ? ' (dato de respaldo)' : ''}</span></article>
-                  <article className="metric-box"><span className="metric-label">Clima en {dataApi.clima.ciudad}</span><div className="metric-val">{dataApi.clima.temp == null ? '—' : `${dataApi.clima.temp}°`}<small>{dataApi.clima.temp == null ? '' : 'C'}</small></div><span className="metric-foot">{[weatherDetails(dataApi.clima), dataApi.clima.source || 'Fuente no identificada'].filter(Boolean).join(' · ')}{dataApi.clima.stale ? ' (dato de respaldo)' : ''}</span></article>
+            <div className="metric-card-grid analysis-metrics">
+              <article className="metric-box"><span className="metric-label">Hábitos completados hoy</span><div className="metric-val">{completeCount}<small> / {habits.length}</small></div><span className="metric-foot">Avances que marcaste en Inicio</span></article>
+              <article className="metric-box"><span className="metric-label">Actividad física hoy</span><div className="metric-val">{todaysExerciseMinutes}<small> min</small></div><span className="metric-foot">{todaysExerciseSessions.length} sesión(es) guardadas</span></article>
+              <article className="metric-box"><span className="metric-label">Comidas de hoy</span><div className="metric-val">{mealsToday.length}</div><span className="metric-foot">Comidas en tu plan de alimentación</span></article>
+              <article className="metric-box"><span className="metric-label">Gastos de hoy</span><div className="metric-val metric-money">{currency(dailyExpenseTotal)}</div><span className="metric-foot">{dailyExpenses.length} compras registradas en Finanzas</span></article>
+            </div>
+            <div className="analysis-grid">
+              <article className="card analysis-chart-card">
+                <div className="section-heading"><div><span className="section-kicker">ÚLTIMOS 7 DÍAS</span><h2><Activity size={19} /> Minutos de actividad física</h2></div></div>
+                <BarChart records={weeklyExerciseSummary} />
+              </article>
+              <article className="card insight-card">
+                <div className="insight-head"><span className="insight-badge"><Sparkles size={18} /></span><span className="section-kicker">RESUMEN DE TUS SECCIONES</span></div>
+                <h2>Tu información se organiza donde la necesitas.</h2>
+                <div className="insight-details">
+                  <div><span>Actividad física</span><strong>{exerciseSessions.length ? `${exerciseSessions.length} sesión(es) guardadas` : 'Aún no has guardado sesiones'}</strong></div>
+                  <div><span>Alimentación</span><strong>{mealPlans.length ? `${mealPlans.length} comida(s) en tu plan` : 'Aún no has agregado comidas'}</strong></div>
+                  <div><span>Calendario</span><strong>{events.length ? `${events.length} evento(s) guardados` : 'Aún no tienes eventos'}</strong></div>
+                  <div><span>Finanzas</span><strong>{expenses.length ? `${expenses.length} gasto(s) registrados` : 'Aún no has agregado gastos'}</strong></div>
                 </div>
-                <div className="analysis-grid">
-                  <article className="card analysis-chart-card"><div className="section-heading"><div><span className="section-kicker">HISTORIAL GUARDADO</span><h2><Activity size={19} /> Evolución del rendimiento</h2></div></div><BarChart records={history.slice(-7)} /></article>
-                  <article className="card insight-card">
-                    <div className="insight-head"><span className="insight-badge"><Sparkles size={18} /></span><span className="section-kicker">RESUMEN DE HOY</span></div>
-                    <h2>{dataApi.diagnostico.resumen}</h2>
-                    <div className="insight-details">
-                      <div><span>Actividad</span><strong>{dataApi.actividadNombre} · {horas} h</strong></div>
-                      <div><span>Alimentación</span><strong>{dataApi.nutricion.alimento} · {dataApi.nutricion.calorias} kcal aprox. · {dataApi.nutricion.source || 'estimación local'}{dataApi.nutricion.stale ? ' (estimación)' : ''}</strong></div>
-                      <div><span>Ejercicio</span><strong>{ejercicioCumplido ? `${ejercicio} · ${duracionEjercicio} min · intensidad ${intensidadEjercicio}/5` : 'No realizó ejercicio hoy'}</strong></div>
-                      {ejercicioCumplido && <div><span>Productividad del ejercicio</span><strong>{productividadEjercicio}/5 · Autoevaluación personal</strong></div>}
-                      <div><span>Gasto del día</span><strong>{currency(expenseTotal)} PEN aprox.</strong></div>
-                    </div>
-                    <div className="data-disclaimer"><Circle size={13} /> Nutrición estimada por producto. La productividad del ejercicio es una autoevaluación y no forma parte del puntaje del backend.</div>
-                  </article>
-                </div>
-                <button className="btn-pdf" onClick={descargarPDF}><Download size={17} /> Descargar informe PDF</button>
-              </>
-            )}
+              </article>
+            </div>
+            <button className="btn-pdf" onClick={descargarPDF}><Download size={17} /> Descargar informe PDF</button>
           </section>
         )}
 

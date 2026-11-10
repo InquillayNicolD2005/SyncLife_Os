@@ -1,13 +1,25 @@
 const express = require('express');
 const { getAdminServices } = require('./firebase-admin');
 const { obtenerClima, getProviderUsage } = require('./synclife');
-const { deleteAccountRecord } = require('./postgres');
+const { isRootAccount, ROOT_ADMIN_EMAIL } = require('./admin-identity');
+const {
+  deleteAccountRecord,
+  getAdminMetrics,
+  isAccountAdmin,
+  listAccounts,
+  listDailyRecords,
+  recordAdminActivity,
+  syncAccount,
+  syncAccounts,
+  setAccountRole,
+} = require('./postgres');
 
 const router = express.Router();
 const PAGE_SIZE = 100;
 const ADMIN_ACTIVITY_COLLECTION = 'adminActivity';
 const ADMIN_RECORDS_COLLECTION = 'adminRecords';
-const validActivityTypes = new Set(['meal', 'routine', 'daily-record']);
+const validActivityTypes = new Set(['meal', 'routine', 'exercise', 'daily-record']);
+let firebaseAccountSync;
 
 function sendAdminError(res, error, fallbackMessage) {
   console.error(fallbackMessage, error);
@@ -40,9 +52,24 @@ async function authenticate(req, res, next) {
   }
 }
 
-function requireAdmin(req, res, next) {
-  if (req.authToken?.admin !== true) {
+async function requireAdmin(req, res, next) {
+  if (req.authToken?.admin !== true || req.authUser.customClaims?.admin !== true) {
     return res.status(403).json({ error: 'Se requiere el rol de administrador.' });
+  }
+  try {
+    if (!await isAccountAdmin(req.authUser.uid)) {
+      return res.status(403).json({ error: 'Esta cuenta no tiene acceso administrativo autorizado.' });
+    }
+    return next();
+  } catch (error) {
+    return sendAdminError(res, error, 'No se pudo validar el rol en PostgreSQL.');
+  }
+}
+
+function requireRootAdmin(req, res, next) {
+  if (!isRootAccount(req.authUser) || req.authToken?.superAdmin !== true
+    || req.authUser.customClaims?.superAdmin !== true) {
+    return res.status(403).json({ error: 'Solo la cuenta propietaria puede gestionar administradores.' });
   }
   return next();
 }
@@ -61,13 +88,26 @@ async function listAllUsers(auth) {
 function toSafeUser(user) {
   return {
     uid: user.uid,
-    name: user.displayName || 'Sin nombre',
+    name: user.name || user.displayName || 'Sin nombre',
     email: user.email || '',
-    createdAt: user.metadata.creationTime || null,
+    createdAt: user.createdAt || user.metadata?.creationTime || null,
     disabled: Boolean(user.disabled),
-    admin: user.customClaims?.admin === true,
-    providers: user.providerData.map((provider) => provider.providerId),
+    admin: user.admin === true || user.customClaims?.admin === true,
+    superAdmin: isRootAccount(user),
+    providers: user.providers || user.providerData?.map((provider) => provider.providerId) || [],
   };
+}
+
+async function ensureFirebaseAccountsSynced(auth) {
+  if (!firebaseAccountSync) {
+    firebaseAccountSync = listAllUsers(auth)
+      .then((users) => syncAccounts(users))
+      .catch((error) => {
+        firebaseAccountSync = null;
+        throw error;
+      });
+  }
+  await firebaseAccountSync;
 }
 
 router.post('/activity', authenticate, async (req, res) => {
@@ -82,52 +122,8 @@ router.post('/activity', authenticate, async (req, res) => {
   }
 
   try {
-    const { firestore, fieldValue } = getAdminServices();
-    const summaryRef = firestore.collection(ADMIN_ACTIVITY_COLLECTION).doc(req.authUser.uid);
-    const eventRef = summaryRef.collection('events').doc(`${type}_${recordId}`);
-    const dailyRecordRef = type === 'daily-record'
-      ? firestore.collection(ADMIN_RECORDS_COLLECTION).doc(`${req.authUser.uid}_${recordId}`)
-      : null;
-    const result = await firestore.runTransaction(async (transaction) => {
-      const event = await transaction.get(eventRef);
-      if (event.exists) {
-        if (dailyRecordRef) {
-          const recordData = {
-            score,
-            date: recordId,
-            uid: req.authUser.uid,
-            name: req.authUser.displayName || '',
-            email: req.authUser.email || '',
-            createdAt: fieldValue.serverTimestamp(),
-          };
-          transaction.set(eventRef, { score, createdAt: fieldValue.serverTimestamp() }, { merge: true });
-          transaction.set(dailyRecordRef, recordData, { merge: true });
-          return { recorded: false, updated: true };
-        }
-        return { recorded: false, updated: false };
-      }
-
-      const countField = type === 'meal' ? 'meals' : type === 'routine' ? 'routines' : 'records';
-      const eventData = { type, createdAt: fieldValue.serverTimestamp() };
-      if (type === 'daily-record') eventData.score = score;
-      transaction.create(eventRef, eventData);
-      transaction.set(summaryRef, {
-        [countField]: fieldValue.increment(1),
-        updatedAt: fieldValue.serverTimestamp(),
-      }, { merge: true });
-
-      if (dailyRecordRef) {
-        transaction.create(dailyRecordRef, {
-          score,
-          date: recordId,
-          uid: req.authUser.uid,
-          name: req.authUser.displayName || '',
-          email: req.authUser.email || '',
-          createdAt: fieldValue.serverTimestamp(),
-        });
-      }
-      return { recorded: true, updated: false };
-    });
+    await syncAccount(req.authUser);
+    const result = await recordAdminActivity({ uid: req.authUser.uid, type, recordId, score });
     return res.status(200).json(result);
   } catch (error) {
     return sendAdminError(res, error, 'No se pudo registrar la actividad agregada.');
@@ -146,22 +142,12 @@ router.get('/metrics', async (req, res) => {
     utcDayStart.setUTCHours(0, 0, 0, 0);
     const sevenDaysAgo = new Date(utcDayStart.getTime() - 6 * 24 * 60 * 60 * 1000);
     const recordsRef = firestore.collection(ADMIN_RECORDS_COLLECTION);
-    const [users, activitySnapshot] = await Promise.all([
-      listAllUsers(auth),
-      firestore.collection(ADMIN_ACTIVITY_COLLECTION).get(),
-    ]);
+    await ensureFirebaseAccountsSynced(auth);
     const [totalRecordCount, recentRecordsSnapshot] = await Promise.all([
       recordsRef.count().get(),
       recordsRef.where('createdAt', '>=', previousWeekStart).get(),
     ]);
-    let meals = 0;
-    let routines = 0;
-
-    activitySnapshot.forEach((document) => {
-      const counts = document.data();
-      meals += Number.isSafeInteger(counts.meals) && counts.meals > 0 ? counts.meals : 0;
-      routines += Number.isSafeInteger(counts.routines) && counts.routines > 0 ? counts.routines : 0;
-    });
+    const metrics = await getAdminMetrics();
 
     const timestampOf = (record) => {
       if (record.createdAt && typeof record.createdAt.toDate === 'function') {
@@ -178,9 +164,20 @@ router.get('/metrics', async (req, res) => {
     const averageScore = (records) => {
       const scores = records.map((record) => record.score)
         .filter((score) => Number.isInteger(score) && score >= 0 && score <= 100);
-      return scores.length
-        ? Math.round((scores.reduce((total, score) => total + score, 0) / scores.length) * 10) / 10
-        : null;
+      return {
+        count: scores.length,
+        average: scores.length
+          ? Math.round((scores.reduce((total, score) => total + score, 0) / scores.length) * 10) / 10
+          : null,
+      };
+    };
+    const currentWeekLegacyAverage = averageScore(currentWeekRecords);
+    const previousWeekLegacyAverage = averageScore(previousWeekRecords);
+    const combineAverages = (databaseAverage, databaseCount, legacy) => {
+      const count = databaseCount + legacy.count;
+      if (!count) return null;
+      return Math.round(((Number(databaseAverage || 0) * databaseCount
+        + Number(legacy.average || 0) * legacy.count) / count) * 10) / 10;
     };
     const todayDate = utcDayStart.toISOString().slice(0, 10);
     const previousWeekDate = new Date(utcDayStart.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -189,7 +186,10 @@ router.get('/metrics', async (req, res) => {
     for (let offset = 0; offset < 7; offset += 1) {
       const date = new Date(sevenDaysAgo.getTime() + offset * 24 * 60 * 60 * 1000)
         .toISOString().slice(0, 10);
-      dayCounts.set(date, { date, count: 0 });
+      dayCounts.set(date, {
+        date,
+        count: metrics.recordsLast7Days.find((day) => day.date === date)?.count || 0,
+      });
     }
     recentRecords.forEach((record) => {
       const time = timestampOf(record);
@@ -201,26 +201,16 @@ router.get('/metrics', async (req, res) => {
     });
 
     return res.json({
-      totalUsers: users.length,
-      admins: users.filter((user) => user.customClaims?.admin === true).map(toSafeUser),
-      usersThisWeek: users.filter((user) => Date.parse(user.metadata.creationTime || '') >= weekStart.getTime()).length,
-      usersPreviousWeek: users.filter((user) => {
-        const createdAt = Date.parse(user.metadata.creationTime || '');
-        return createdAt >= previousWeekStart.getTime() && createdAt < weekStart.getTime();
-      }).length,
-      activeToday: users.filter((user) => {
-        const lastSignIn = Date.parse(user.metadata.lastSignInTime || '');
-        return !user.disabled && Number.isFinite(lastSignIn) && lastSignIn >= utcDayStart.getTime();
-      }).length,
-      totalMeals: meals,
-      totalRoutines: routines,
-      totalRecords: totalRecordCount.data().count,
-      recordsThisWeek: currentWeekRecords.length,
-      recordsPreviousWeek: previousWeekRecords.length,
-      recordsToday: recentRecords.filter((record) => record.date === todayDate).length,
-      recordsSameDayPreviousWeek: recentRecords.filter((record) => record.date === previousWeekDate).length,
-      averageScore: averageScore(currentWeekRecords),
-      previousAverageScore: averageScore(previousWeekRecords),
+      ...metrics,
+      admins: metrics.admins.map(toSafeUser),
+      totalRecords: metrics.totalRecords + totalRecordCount.data().count,
+      recordsThisWeek: metrics.recordsThisWeek + currentWeekRecords.length,
+      recordsPreviousWeek: metrics.recordsPreviousWeek + previousWeekRecords.length,
+      recordsToday: metrics.recordsToday + recentRecords.filter((record) => record.date === todayDate).length,
+      recordsSameDayPreviousWeek: metrics.recordsSameDayPreviousWeek
+        + recentRecords.filter((record) => record.date === previousWeekDate).length,
+      averageScore: combineAverages(metrics.averageScore, metrics.scoredRecordsThisWeek, currentWeekLegacyAverage),
+      previousAverageScore: combineAverages(metrics.previousAverageScore, metrics.scoredRecordsPreviousWeek, previousWeekLegacyAverage),
       recordsLast7Days: [...dayCounts.values()],
       updatedAt: now.toISOString(),
     });
@@ -232,28 +222,44 @@ router.get('/metrics', async (req, res) => {
 router.get('/records', async (req, res) => {
   try {
     const { firestore } = getAdminServices();
-    const pageSize = 100;
-    const recordsRef = firestore.collection(ADMIN_RECORDS_COLLECTION);
-    let query = recordsRef.orderBy('createdAt', 'desc').limit(pageSize);
-    if (typeof req.query.pageToken === 'string' && req.query.pageToken) {
-      const cursor = await recordsRef.doc(req.query.pageToken).get();
-      if (!cursor.exists) return res.status(400).json({ error: 'No se encontró el punto desde donde continuar.' });
-      query = recordsRef.orderBy('createdAt', 'desc').startAfter(cursor).limit(pageSize);
+    const pageSize = PAGE_SIZE;
+    const pageOffset = req.query.pageToken === undefined ? 0 : Number(req.query.pageToken);
+    if (!Number.isSafeInteger(pageOffset) || pageOffset < 0 || pageOffset > 10000
+      || !/^\d+$/.test(String(req.query.pageToken ?? '0'))) {
+      return res.status(400).json({ error: 'El número de página no es válido.' });
     }
-    const page = await query.get();
+    const querySize = pageOffset + pageSize + 1;
+    const recordsRef = firestore.collection(ADMIN_RECORDS_COLLECTION);
+    const [databasePage, legacyCount, legacyPage] = await Promise.all([
+      listDailyRecords(querySize, 0),
+      recordsRef.count().get(),
+      recordsRef.orderBy('createdAt', 'desc').limit(querySize).get(),
+    ]);
+    const legacyRecords = legacyPage.docs.map((document) => {
+      const record = document.data();
+      return {
+        id: document.id,
+        uid: record.uid || '',
+        name: record.name || 'Sin nombre',
+        email: record.email || '',
+        date: record.date || '',
+        score: Number.isInteger(record.score) ? record.score : null,
+        createdAt: record.createdAt?.toDate?.().toISOString() || null,
+      };
+    });
+    const records = [
+      ...databasePage.records.map((record) => ({ ...record, id: `pg-${record.id}` })),
+      ...legacyRecords,
+    ].sort((first, second) => {
+      const firstTime = Date.parse(first.createdAt || '');
+      const secondTime = Date.parse(second.createdAt || '');
+      return (Number.isFinite(secondTime) ? secondTime : 0) - (Number.isFinite(firstTime) ? firstTime : 0)
+        || first.id.localeCompare(second.id);
+    });
+    const total = databasePage.total + legacyCount.data().count;
     return res.json({
-      records: page.docs.map((document) => {
-        const record = document.data();
-        return {
-          id: document.id,
-          name: record.name || 'Sin nombre',
-          email: record.email || '',
-          date: record.date || '',
-          score: Number.isInteger(record.score) ? record.score : null,
-          createdAt: record.createdAt?.toDate?.().toISOString() || null,
-        };
-      }),
-      nextPageToken: page.docs.length === pageSize ? page.docs[page.docs.length - 1].id : null,
+      records: records.slice(pageOffset, pageOffset + pageSize),
+      nextPageToken: pageOffset + pageSize < total ? String(pageOffset + pageSize) : null,
     });
   } catch (error) {
     return sendAdminError(res, error, 'No se pudieron cargar los registros diarios.');
@@ -263,13 +269,88 @@ router.get('/records', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const { auth } = getAdminServices();
-    const page = await auth.listUsers(PAGE_SIZE, typeof req.query.pageToken === 'string' ? req.query.pageToken : undefined);
+    const pageOffset = Number.parseInt(req.query.pageToken || '0', 10);
+    if (!Number.isSafeInteger(pageOffset) || pageOffset < 0) {
+      return res.status(400).json({ error: 'El número de página no es válido.' });
+    }
+    if (pageOffset === 0) await ensureFirebaseAccountsSynced(auth);
+    const page = await listAccounts(PAGE_SIZE, pageOffset);
+    const users = page.users.map(toSafeUser);
     return res.json({
-      users: page.users.map(toSafeUser),
-      nextPageToken: page.pageToken || null,
+      users,
+      nextPageToken: pageOffset + users.length < page.total ? String(pageOffset + users.length) : null,
     });
   } catch (error) {
     return sendAdminError(res, error, 'No se pudieron cargar las cuentas de usuario.');
+  }
+});
+
+router.post('/admins', requireRootAdmin, async (req, res) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Ingresa un correo válido de una cuenta ya registrada.' });
+  }
+  if (email === ROOT_ADMIN_EMAIL) {
+    return res.status(409).json({ error: 'La cuenta propietaria ya tiene el rol principal.' });
+  }
+
+  try {
+    const { auth } = getAdminServices();
+    const target = await auth.getUserByEmail(email);
+    await syncAccount(target);
+    if (await isAccountAdmin(target.uid)) {
+      return res.status(409).json({ error: 'Esta cuenta ya tiene acceso de administrador.' });
+    }
+    await auth.setCustomUserClaims(target.uid, { ...target.customClaims, admin: true });
+    const updatedUser = await auth.getUser(target.uid);
+    await setAccountRole(target.uid, 'admin', req.authUser.uid);
+    let warning = null;
+    try {
+      await auth.revokeRefreshTokens(target.uid);
+    } catch (error) {
+      console.error('Se asignó el rol, pero no se pudieron revocar las sesiones anteriores:', error);
+      warning = 'El rol se asignó, pero la persona deberá cerrar e iniciar sesión para que se actualice.';
+    }
+    return res.json({ user: toSafeUser(updatedUser), warning });
+  } catch (error) {
+    if (error.code === 'auth/user-not-found') {
+      return res.status(404).json({ error: 'No existe una cuenta registrada con ese correo.' });
+    }
+    return sendAdminError(res, error, 'No se pudo asignar el rol de administrador.');
+  }
+});
+
+router.delete('/admins/:uid', requireRootAdmin, async (req, res) => {
+  const { uid } = req.params;
+  if (!uid || uid === req.authUser.uid) {
+    return res.status(400).json({ error: 'No puedes retirar el rol de tu propia cuenta propietaria.' });
+  }
+  try {
+    const { auth } = getAdminServices();
+    const target = await auth.getUser(uid);
+    if (isRootAccount(target)) {
+      return res.status(409).json({ error: 'No se puede retirar el rol de la cuenta propietaria.' });
+    }
+    if (!await isAccountAdmin(uid)) {
+      return res.status(409).json({ error: 'La cuenta indicada no es administradora.' });
+    }
+    await setAccountRole(uid, 'user');
+    const claims = { ...target.customClaims };
+    delete claims.admin;
+    delete claims.superAdmin;
+    await auth.setCustomUserClaims(uid, claims);
+    const updatedUser = await auth.getUser(uid);
+    await syncAccount(updatedUser);
+    let warning = null;
+    try {
+      await auth.revokeRefreshTokens(uid);
+    } catch (error) {
+      console.error('Se retiró el rol, pero no se pudieron revocar inmediatamente las sesiones:', error);
+      warning = 'El rol se retiró, pero no se pudieron revocar inmediatamente las sesiones anteriores.';
+    }
+    return res.json({ user: toSafeUser(updatedUser), warning });
+  } catch (error) {
+    return sendAdminError(res, error, 'No se pudo retirar el rol de administrador.');
   }
 });
 
@@ -286,10 +367,11 @@ router.patch('/users/:uid/status', async (req, res) => {
   try {
     const { auth } = getAdminServices();
     const target = await auth.getUser(uid);
-    if (target.customClaims?.admin === true) {
+    if (await isAccountAdmin(uid) || isRootAccount(target)) {
       return res.status(409).json({ error: 'No se pueden bloquear ni desbloquear cuentas de administrador desde este panel.' });
     }
     const updatedUser = await auth.updateUser(uid, { disabled });
+    await syncAccount(updatedUser);
     if (disabled) {
       try {
         await auth.revokeRefreshTokens(uid);
@@ -317,7 +399,7 @@ router.delete('/users/:uid', async (req, res) => {
   try {
     const { auth, firestore } = getAdminServices();
     const target = await auth.getUser(uid);
-    if (target.customClaims?.admin === true) {
+    if (await isAccountAdmin(uid) || isRootAccount(target)) {
       return res.status(409).json({ error: 'No se pueden eliminar cuentas de administrador desde este panel.' });
     }
     await auth.deleteUser(uid);
@@ -333,6 +415,24 @@ router.delete('/users/:uid', async (req, res) => {
     } catch (cleanupError) {
       console.error('La cuenta se eliminó, pero no se pudieron borrar sus contadores agregados:', cleanupError);
       cleanupWarnings.push('No se pudieron borrar sus contadores agregados.');
+    }
+    try {
+      const usernameProfileRef = firestore.collection('usernamesByUid').doc(uid);
+      const usernameProfile = await usernameProfileRef.get();
+      const username = usernameProfile.exists ? usernameProfile.get('username') : null;
+      if (typeof username === 'string') {
+        const usernameRef = firestore.collection('usernames').doc(username.toLowerCase());
+        await firestore.runTransaction(async (transaction) => {
+          const reservation = await transaction.get(usernameRef);
+          if (reservation.exists && reservation.get('uid') === uid) transaction.delete(usernameRef);
+          transaction.delete(usernameProfileRef);
+        });
+      } else if (usernameProfile.exists) {
+        await usernameProfileRef.delete();
+      }
+    } catch (cleanupError) {
+      console.error('La cuenta se eliminó, pero no se pudo liberar su nombre de usuario:', cleanupError);
+      cleanupWarnings.push('No se pudo liberar su nombre de usuario.');
     }
     try {
       const recordSnapshot = await firestore.collection(ADMIN_RECORDS_COLLECTION)

@@ -41,12 +41,17 @@ function readLocalEnvironment() {
   return fileEnvironment;
 }
 
+if (!process.env.FIREBASE_WEB_API_KEY) {
+  const localWebApiKey = readLocalEnvironment().FIREBASE_WEB_API_KEY;
+  if (localWebApiKey) process.env.FIREBASE_WEB_API_KEY = localWebApiKey;
+}
+
 function getAIConfig() {
   const fileEnvironment = readLocalEnvironment();
   const getValue = (name) => (process.env[name] || fileEnvironment[name] || '').trim();
   const provider = (getValue('AI_PROVIDER') || 'gemini').toLowerCase();
   const settings = {
-    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-3.8-flash' },
+    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-2.5-flash' },
     openai: { apiKey: getValue('OPENAI_API_KEY'), model: getValue('OPENAI_MODEL') || 'gpt-4o-mini' },
   };
   if (!settings[provider]) {
@@ -188,7 +193,9 @@ app.post('/api/synclife/nutrition/search', async (req, res) => {
 
     const matches = await buscarProductosNutricion(food);
     if (!matches.length) {
-      return res.status(404).json({ error: 'FoodData Central no encontró alimentos con datos nutricionales. Prueba escribiendo el ingrediente en español o en inglés.' });
+      return res.status(404).json({
+        error: 'No encontramos en USDA un alimento o plato que coincida suficientemente con lo que escribiste. Prueba con los ingredientes principales (por ejemplo, "arroz con pollo") o ingresa los nutrientes manualmente.',
+      });
     }
     return res.json({
       matches,
