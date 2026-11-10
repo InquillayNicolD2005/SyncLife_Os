@@ -15,11 +15,12 @@ const { isPostgresConfigured } = require('./postgres');
 
 const app = express();
 const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+const productionOrigins = ['https://synclifeos.vercel.app'];
 const configuredOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
-const allowedOrigins = new Set([...localOrigins, ...configuredOrigins]);
+const allowedOrigins = new Set([...localOrigins, ...productionOrigins, ...configuredOrigins]);
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.has(origin)) return callback(null, true);
@@ -51,7 +52,7 @@ function getAIConfig() {
   const getValue = (name) => (process.env[name] || fileEnvironment[name] || '').trim();
   const provider = (getValue('AI_PROVIDER') || 'gemini').toLowerCase();
   const settings = {
-    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-2.5-flash' },
+    gemini: { apiKey: getValue('GEMINI_API_KEY'), model: getValue('GEMINI_MODEL') || 'gemini-3.8-flash' },
     openai: { apiKey: getValue('OPENAI_API_KEY'), model: getValue('OPENAI_MODEL') || 'gpt-4o-mini' },
   };
   if (!settings[provider]) {
