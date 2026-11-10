@@ -7,6 +7,8 @@ const envPath = path.join(__dirname, '.env');
 
 const { obtenerClima, convertirMoneda, analizarNutricion, generarDiagnostico, guardarRegistroDB } = require('./synclife');
 const adminRoutes = require('./admin-routes');
+const accountRoutes = require('./account-routes');
+const { isPostgresConfigured } = require('./postgres');
 
 const app = express();
 const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
@@ -23,6 +25,7 @@ app.use(cors({
 }));
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
+app.use('/api/account', accountRoutes);
 
 function readLocalEnvironment() {
   if (!fs.existsSync(envPath)) return {};
@@ -158,7 +161,12 @@ app.get('/api/health', (req, res) => {
   } catch (error) {
     ai = { configured: false, error: error.message };
   }
-  return res.json({ status: 'ok', ai, timestamp: new Date().toISOString() });
+  return res.json({
+    status: 'ok',
+    ai,
+    database: { configured: isPostgresConfigured() },
+    timestamp: new Date().toISOString(),
+  });
 });
 
 app.get('/api/synclife/weather', async (req, res) => {

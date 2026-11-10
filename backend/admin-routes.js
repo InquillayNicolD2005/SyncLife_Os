@@ -1,6 +1,7 @@
 const express = require('express');
 const { getAdminServices } = require('./firebase-admin');
 const { obtenerClima, getProviderUsage } = require('./synclife');
+const { deleteAccountRecord } = require('./postgres');
 
 const router = express.Router();
 const PAGE_SIZE = 100;
@@ -195,15 +196,20 @@ router.delete('/users/:uid', async (req, res) => {
       return res.status(409).json({ error: 'No se pueden eliminar cuentas de administrador desde este panel.' });
     }
     await auth.deleteUser(uid);
+    const cleanupWarnings = [];
+    try {
+      await deleteAccountRecord(uid);
+    } catch (cleanupError) {
+      console.error('La cuenta se eliminó de Firebase, pero no de PostgreSQL:', cleanupError);
+      cleanupWarnings.push('No se pudo borrar el registro de la base de datos PostgreSQL.');
+    }
     try {
       await firestore.recursiveDelete(firestore.collection(ADMIN_ACTIVITY_COLLECTION).doc(uid));
     } catch (cleanupError) {
       console.error('La cuenta se eliminó, pero no se pudieron borrar sus contadores agregados:', cleanupError);
-      return res.json({
-        deleted: true,
-        warning: 'La cuenta se eliminó, pero no se pudieron borrar sus contadores agregados.',
-      });
+      cleanupWarnings.push('No se pudieron borrar sus contadores agregados.');
     }
+    if (cleanupWarnings.length) return res.json({ deleted: true, warning: cleanupWarnings.join(' ') });
     return res.status(204).end();
   } catch (error) {
     return sendAdminError(res, error, 'No se pudo eliminar la cuenta.');

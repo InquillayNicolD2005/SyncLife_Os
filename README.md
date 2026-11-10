@@ -16,7 +16,11 @@ Inicia frontend y backend con `npm run dev`. En desarrollo, el backend usa el pu
 
 La autenticación usa Firebase Authentication. La configuración web del proyecto está incluida como valor predeterminado en el frontend; opcionalmente puede sobrescribirse con las variables de `frontend/.env.example` en `frontend/.env.local` o en Vercel. En Firebase Console, habilita **Authentication → Sign-in method → Google** y agrega `localhost` y el dominio de producción (por ejemplo, `synclifeos.vercel.app`) en **Authentication → Settings → Authorized domains**. El primer inicio con Google crea automáticamente la cuenta si aún no existe. La clave API web es pública para clientes y debe restringirse en Google Cloud a los dominios y APIs necesarios; no la uses como secreto de servidor.
 
-La autenticación es real, pero los datos de SyncLife actualmente se guardan en el navegador, separados por UID de Firebase; no se sincronizan entre dispositivos ni se almacenan en Firebase.
+Firebase Authentication sigue siendo responsable del inicio de sesión, registro y contraseñas. Al iniciar sesión, el backend verifica el token y sincroniza en PostgreSQL el UID de Firebase, correo, nombre visible y rol (`user` o `admin`). No se guardan contraseñas en PostgreSQL. Los datos de hábitos, comidas, rutinas y finanzas siguen guardándose en el navegador y no se sincronizan entre dispositivos.
+
+### Base de datos PostgreSQL en Render
+
+En Render, crea o selecciona una base PostgreSQL y copia su **Internal Database URL** en la variable `DATABASE_URL` del servicio backend. No la pongas en Vercel ni en una variable `VITE_*`, y no la subas a Git. El backend crea automáticamente la tabla `synclife_accounts`; el registro se sincroniza al iniciar sesión y los roles se derivan de la custom claim verificada de Firebase. El endpoint `/api/health` muestra `database.configured: true` cuando `DATABASE_URL` está definida. Las cuentas existentes se incorporan al iniciar sesión después del despliegue. El panel sigue usando Firebase Authentication como fuente para listar, bloquear y eliminar las cuentas.
 
 ## Panel administrativo
 
@@ -32,7 +36,7 @@ El panel aparece en la navegación solo cuando el usuario tiene la custom claim 
    ```
 
    El comando requiere las mismas credenciales Admin SDK. Cierra sesión y vuelve a entrar (o usa «Volver a comprobar mi rol») para refrescar el token. Vuelve a desplegar el backend después de configurarle las variables.
-4. Inicia la app con `npm run dev`. El panel contiene Resumen, Usuarios, Estado de APIs y Seguridad. Bloquear deshabilita la cuenta en Firebase y revoca sus tokens; eliminar borra la cuenta de Firebase Auth y sus contadores agregados. Los datos personales de la app están en `localStorage` del dispositivo y no pueden borrarse remotamente desde el panel.
+4. Inicia la app con `npm run dev`. El panel contiene Resumen, Usuarios, Estado de APIs y Seguridad. Bloquear deshabilita la cuenta en Firebase y revoca sus tokens; eliminar borra la cuenta de Firebase Auth, su registro en PostgreSQL y sus contadores agregados. Los datos personales de la app están en `localStorage` del dispositivo y no pueden borrarse remotamente desde el panel.
 
 Los contadores de comidas y rutinas empiezan desde que se habilita esta versión; los registros históricos locales no se pueden reconstruir. Solo se envían el tipo de actividad y un ID opaco para deduplicarla, nunca el contenido de comidas, peso, edad, talla, finanzas o calendario. «Activos hoy» se estima con el último inicio de sesión de Firebase (día UTC). La comprobación de YouTube usa oEmbed; la app usa iframes y no consume cuota de YouTube Data API. El consumo del clima cuenta solicitudes a proveedores desde que arrancó el proceso del backend y se reinicia al desplegar.
 

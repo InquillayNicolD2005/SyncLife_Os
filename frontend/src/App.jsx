@@ -65,6 +65,26 @@ async function adminRequest(user, path, options = {}) {
   return result;
 }
 
+async function syncAccountWithBackend(user) {
+  const token = await user.getIdToken(true);
+  const response = await fetch(apiUrl('/api/account/sync'), {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  const responseText = await response.text();
+  let result = {};
+  if (responseText) {
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      throw new Error('El backend devolvió una respuesta que no se pudo leer al guardar la cuenta.');
+    }
+  }
+  if (!response.ok) {
+    throw new Error(result.error || 'No se pudo guardar la cuenta en la base de datos.');
+  }
+  return result;
+}
 function AdminPanel({ user, isAdmin, onRefreshClaim }) {
   const [section, setSection] = useState('summary');
   const [metrics, setMetrics] = useState(null);
@@ -1152,6 +1172,10 @@ export default function App() {
         enterWorkspace(user);
         user.getIdTokenResult().then((tokenResult) => {
           setIsAdmin(tokenResult.claims.admin === true);
+          syncAccountWithBackend(user).catch((error) => {
+            console.error('No se pudo sincronizar el usuario con la base de datos de Render:', error);
+            setNotification(`No se guardó la cuenta en la base de datos: ${error.message}`);
+          });
         }).catch((error) => {
           console.error('No se pudo comprobar el rol administrativo:', error);
           setIsAdmin(false);
@@ -1267,11 +1291,22 @@ export default function App() {
         enterWorkspace(credential.user);
       } else if (adminLoginMode) {
         const credential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
-        const tokenResult = await credential.user.getIdTokenResult(true);
-        if (tokenResult.claims.admin !== true) {
+        setAuthPassword('');
+        let tokenResult;
+        try {
+          tokenResult = await credential.user.getIdTokenResult(true);
+        } catch (error) {
           await signOut(auth);
+          throw error;
+        }
+        if (tokenResult.claims.admin !== true) {
           setIsAdmin(false);
-          setIsLoggedIn(false);
+          try {
+            await signOut(auth);
+            setIsLoggedIn(false);
+          } catch (error) {
+            console.error('No se pudo cerrar la sesión de una cuenta sin permisos administrativos:', error);
+          }
           setAuthError('No tienes permisos de administrador');
           return;
         }
@@ -1985,7 +2020,7 @@ export default function App() {
 
   if (!isLoggedIn || adminLoginMode) {
     return (
-      <main className="login-screen">
+      <main className={`login-screen ${adminLoginMode ? 'admin-login-screen' : 'login-split-screen'}`}>
         <div className="login-backdrop-orb login-orb-one" />
         <div className="login-backdrop-orb login-orb-two" />
         <div className="login-icon login-icon-calendar"><CalendarDays /></div>
@@ -1997,6 +2032,7 @@ export default function App() {
             <ShieldCheck size={16} /> Admin
           </button>
         )}
+        <div className="login-layout">
         <section className="login-card" aria-labelledby="login-title">
           {adminLoginMode && (
             <button className="login-admin-back" type="button" onClick={returnToHome}>
@@ -2011,12 +2047,12 @@ export default function App() {
               ))}
             </div>
           )}
-          <span className="section-kicker">{adminLoginMode ? 'ACCESO RESTRINGIDO' : 'TU ESPACIO PERSONAL'}</span>
-          <h1 id="login-title">{adminLoginMode ? 'Administración' : authMode === 'register' ? 'Crea tu cuenta' : 'Bienvenido a SyncLife'}</h1>
+          <span className="section-kicker">{adminLoginMode ? 'ACCESO RESTRINGIDO' : authMode === 'register' ? 'ÚNETE A SYNCLIFE' : 'TU ESPACIO PERSONAL'}</span>
+          <h1 id="login-title">{adminLoginMode ? 'Administración' : authMode === 'register' ? 'Crea tu cuenta' : 'Inicio de sesión'}</h1>
           <p>{adminLoginMode
             ? 'Inicia sesión con una cuenta autorizada de administrador.'
             : authMode === 'register'
-              ? 'Regístrate con tu correo para guardar tu espacio personal.'
+              ? 'Crea tu cuenta y organiza tus hábitos, bienestar y finanzas.'
               : 'Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.'}</p>
           {!authReady && <p className="login-auth-status" role="status">Comprobando tu sesión…</p>}
           {authError && <p className="login-auth-error" role="alert">{authError}</p>}
@@ -2102,10 +2138,10 @@ export default function App() {
                 {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
               </button>
               <p className="login-mode-switch">
-                {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Aún no tienes una cuenta?'}
+                {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Eres nuevo?'}
                 {' '}
                 <button className="login-text-button" type="button" onClick={() => changeAuthMode(authMode === 'register' ? 'login' : 'register')}>
-                  {authMode === 'register' ? 'Inicia sesión' : 'Regístrate'}
+                  {authMode === 'register' ? 'Inicia sesión' : 'Crea una cuenta'}
                 </button>
               </p>
             </>
@@ -2119,6 +2155,24 @@ export default function App() {
             ? 'El acceso administrativo se verifica con el rol asignado en Firebase.'
             : 'Con Google o correo, tus datos de SyncLife se guardan por cuenta en este navegador.'}</small>
         </section>
+        {!adminLoginMode && (
+          <aside className="login-art-panel" aria-label="Bienestar en equilibrio">
+            <div className="login-art-glow" />
+            <div className="login-art-stars" aria-hidden="true" />
+            <div className="login-art-moon" aria-hidden="true" />
+            <div className="login-art-hill login-art-hill-back" aria-hidden="true" />
+            <div className="login-art-hill login-art-hill-front" aria-hidden="true" />
+            <div className="login-art-copy">
+              <img src="/synclife-logo.png" alt="" />
+              <span className="section-kicker">SYNC YOUR LIFE</span>
+              <h2>Pequeños pasos,<br />grandes cambios.</h2>
+              <p>Un espacio para avanzar a tu ritmo y cuidar de ti cada día.</p>
+            </div>
+            <div className="login-art-orbit login-art-orbit-one" aria-hidden="true" />
+            <div className="login-art-orbit login-art-orbit-two" aria-hidden="true" />
+          </aside>
+        )}
+        </div>
       </main>
     );
   }
