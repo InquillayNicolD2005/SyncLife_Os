@@ -1,7 +1,7 @@
 const express = require('express');
 const { getAdminServices } = require('./firebase-admin');
 const { obtenerClima, getProviderUsage } = require('./synclife');
-const { deleteAccountRecord } = require('./postgres');
+const { deleteAccountRecord, syncAccount } = require('./postgres');
 
 const router = express.Router();
 const PAGE_SIZE = 100;
@@ -145,6 +145,41 @@ router.get('/users', async (req, res) => {
     });
   } catch (error) {
     return sendAdminError(res, error, 'No se pudieron cargar las cuentas de usuario.');
+  }
+});
+
+router.patch('/users/:uid/admin', async (req, res) => {
+  const { uid } = req.params;
+  if (!uid || req.body?.admin !== true) {
+    return res.status(400).json({ error: 'La acción solo permite otorgar el rol de administrador.' });
+  }
+  if (uid === req.authUser.uid) {
+    return res.status(400).json({ error: 'No puedes modificar tu propio rol desde este panel.' });
+  }
+
+  try {
+    const { auth } = getAdminServices();
+    const target = await auth.getUser(uid);
+    if (target.disabled) {
+      return res.status(409).json({ error: 'Desbloquea la cuenta antes de otorgarle permisos de administrador.' });
+    }
+    if (target.customClaims?.admin !== true) {
+      await auth.setCustomUserClaims(uid, { ...target.customClaims, admin: true });
+    }
+    const promotedUser = await auth.getUser(uid);
+    let warning;
+    try {
+      await syncAccount(promotedUser, 'admin');
+    } catch (databaseError) {
+      console.error('El rol admin se asignó en Firebase, pero no se pudo sincronizar en PostgreSQL:', databaseError);
+      warning = 'El rol se asignó en Firebase, pero no se pudo sincronizar el registro PostgreSQL.';
+    }
+    return res.json({
+      user: toSafeUser(promotedUser),
+      ...(warning ? { warning } : {}),
+    });
+  } catch (error) {
+    return sendAdminError(res, error, 'No se pudieron asignar permisos de administrador.');
   }
 });
 

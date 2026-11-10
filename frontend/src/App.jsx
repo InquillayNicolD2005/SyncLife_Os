@@ -181,6 +181,26 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
     }
   };
 
+  const grantAdminRole = async (account) => {
+    if (!window.confirm(`¿Dar permisos de administrador a ${account.email || account.name}? Tendrá acceso al panel y podrá administrar otras cuentas.`)) return;
+    setBusyUid(account.uid);
+    setError('');
+    setNotice('');
+    try {
+      const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}/admin`, {
+        method: 'PATCH',
+        body: JSON.stringify({ admin: true }),
+      });
+      setUsers((current) => current.map((item) => item.uid === account.uid ? result.user : item));
+      setNotice(result.warning || `Permisos de administrador asignados a ${account.email || account.name}. Debe volver a iniciar sesión para actualizar su acceso.`);
+    } catch (requestError) {
+      console.error('No se pudieron asignar permisos de administrador:', requestError);
+      setError(requestError.message);
+    } finally {
+      setBusyUid('');
+    }
+  };
+
   const deleteAccount = async (account) => {
     if (!window.confirm(`Eliminar permanentemente la cuenta ${account.email || account.name}? Esta acción no se puede deshacer. Los datos guardados localmente en el dispositivo del usuario no se borran.`)) return;
     setBusyUid(account.uid);
@@ -276,8 +296,11 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
                     <td data-label="Registro">{formatApiDate(account.createdAt)}</td>
                     <td data-label="Estado"><span className={`admin-user-state ${account.disabled ? 'blocked' : 'enabled'}`}>{account.disabled ? 'Bloqueado' : 'Activo'}{account.admin ? ' · Admin' : ''}</span></td>
                     <td data-label="Acciones">
-                      {account.admin ? <span className="admin-protected-user">Cuenta protegida</span> : (
+                      {account.admin ? <span className="admin-protected-user">Admin · Cuenta protegida</span> : (
                         <div className="admin-user-actions">
+                          <button type="button" className="admin-action-button" onClick={() => grantAdminRole(account)} disabled={busyUid === account.uid || account.disabled}>
+                            <ShieldCheck size={14} />Dar admin
+                          </button>
                           <button type="button" className="admin-action-button" onClick={() => updateAccountStatus(account)} disabled={busyUid === account.uid}>
                             {account.disabled ? <Unlock size={14} /> : <Lock size={14} />}
                             {account.disabled ? 'Desbloquear' : 'Bloquear'}
@@ -333,7 +356,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
           <div className="admin-security-grid">
             <article><strong>Firestore</strong><p>Reglas desplegadas: solo administradores pueden leer los contadores agregados; las escrituras pasan por el backend autenticado.</p></article>
             <article><strong>Datos personales</strong><p>No se exponen edad, peso, talla, calorías, finanzas, calendario, comidas ni rutinas individuales en el panel.</p></article>
-            <article><strong>Cuentas admin</strong><p>Las cuentas de administradores no se pueden bloquear ni eliminar desde esta interfaz.</p></article>
+            <article><strong>Permisos admin</strong><p>Un administrador puede otorgar el rol a una cuenta activa. Las cuentas administradoras no se pueden bloquear ni eliminar desde esta interfaz.</p></article>
           </div>
           <button type="button" className="admin-load-more" onClick={onRefreshClaim}>Volver a comprobar mi rol</button>
         </div>
@@ -660,7 +683,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
-  const [adminLoginMode, setAdminLoginMode] = useState(false);
+  const [adminClaimReady, setAdminClaimReady] = useState(false);
+  const [adminEntryRequested, setAdminEntryRequested] = useState(false);
   const [showLogoutDialog, setShowLogoutDialog] = useState(false);
   const [logoutError, setLogoutError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
@@ -1158,6 +1182,7 @@ export default function App() {
   useEffect(() => {
     if (!auth || !firebaseConfigured) {
       enterDemoWorkspace();
+      setAdminClaimReady(true);
       setAuthReady(true);
       setAuthError('');
       return undefined;
@@ -1169,9 +1194,11 @@ export default function App() {
     return onAuthStateChanged(auth, (user) => {
       if (user) {
         setAuthError('');
+        setAdminClaimReady(false);
         enterWorkspace(user);
         user.getIdTokenResult().then((tokenResult) => {
           setIsAdmin(tokenResult.claims.admin === true);
+          setAdminClaimReady(true);
           syncAccountWithBackend(user).catch((error) => {
             console.error('No se pudo sincronizar el usuario con la base de datos de Render:', error);
             setNotification(`No se guardó la cuenta en la base de datos: ${error.message}`);
@@ -1179,11 +1206,14 @@ export default function App() {
         }).catch((error) => {
           console.error('No se pudo comprobar el rol administrativo:', error);
           setIsAdmin(false);
+          setAdminClaimReady(true);
           setAuthError('No se pudo comprobar el acceso administrativo. Vuelve a iniciar sesión.');
         });
       } else {
         setIsLoggedIn(false);
         setIsAdmin(false);
+        setAdminClaimReady(true);
+        setAdminEntryRequested(false);
         setShowCurtain(false);
         setNotificationsOpen(false);
         setTourStep(-1);
@@ -1200,16 +1230,30 @@ export default function App() {
     if (!isAdmin && vista === 'admin') setVista('inicio');
   }, [isAdmin, vista]);
 
+  useEffect(() => {
+    if (!adminEntryRequested || !isLoggedIn || !adminClaimReady) return;
+    if (isAdmin) {
+      setNotification('');
+      setVista('admin');
+    } else {
+      setNotification('No tienes permisos de administrador');
+    }
+    setAdminEntryRequested(false);
+  }, [adminClaimReady, adminEntryRequested, isAdmin, isLoggedIn]);
+
   const refreshAdminClaim = async () => {
     if (!auth?.currentUser) return;
+    setAdminClaimReady(false);
     try {
       const tokenResult = await auth.currentUser.getIdTokenResult(true);
       setIsAdmin(tokenResult.claims.admin === true);
+      setAdminClaimReady(true);
       setAuthError('');
     } catch (error) {
       console.error('No se pudo actualizar el rol administrativo:', error);
       setAuthError('No se pudo comprobar tu rol. Vuelve a iniciar sesión.');
       setIsAdmin(false);
+      setAdminClaimReady(true);
     }
   };
 
@@ -1241,15 +1285,6 @@ export default function App() {
     }
   };
 
-  const openAdminLogin = () => {
-    setAdminLoginMode(true);
-    setAuthMode('login');
-    setAuthError('');
-    setAuthNotice('');
-    setAuthPassword('');
-    setAuthPasswordConfirmation('');
-  };
-
   const openAdminEntry = () => {
     if (isAdmin) {
       setNotification('');
@@ -1257,17 +1292,12 @@ export default function App() {
     } else if (isLoggedIn) {
       setNotification('No tienes permisos de administrador');
     } else {
-      openAdminLogin();
+      setAdminEntryRequested(true);
+      setAuthMode('login');
+      setAuthEmail('admin@gmail.com');
+      setAuthError('');
+      setAuthNotice('Inicia sesión con admin@gmail.com o con otra cuenta que ya tenga el rol de administrador.');
     }
-  };
-
-  const returnToHome = () => {
-    setAdminLoginMode(false);
-    setAuthMode('login');
-    setAuthError('');
-    setAuthNotice('');
-    setAuthPassword('');
-    setAuthPasswordConfirmation('');
   };
 
   const submitEmailAuth = async (event) => {
@@ -1289,33 +1319,6 @@ export default function App() {
         const displayName = authName.trim();
         if (displayName) await updateProfile(credential.user, { displayName });
         enterWorkspace(credential.user);
-      } else if (adminLoginMode) {
-        const credential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
-        setAuthPassword('');
-        let tokenResult;
-        try {
-          tokenResult = await credential.user.getIdTokenResult(true);
-        } catch (error) {
-          await signOut(auth);
-          throw error;
-        }
-        if (tokenResult.claims.admin !== true) {
-          setIsAdmin(false);
-          try {
-            await signOut(auth);
-            setIsLoggedIn(false);
-          } catch (error) {
-            console.error('No se pudo cerrar la sesión de una cuenta sin permisos administrativos:', error);
-          }
-          setAuthError('No tienes permisos de administrador');
-          return;
-        }
-        enterWorkspace(credential.user);
-        setIsAdmin(true);
-        setShowCurtain(false);
-        setTourStep(-1);
-        setVista('admin');
-        setAdminLoginMode(false);
       } else {
         await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
       }
@@ -1386,7 +1389,7 @@ export default function App() {
       if (auth?.currentUser) await signOut(auth);
       setIsAdmin(false);
       setIsLoggedIn(false);
-      setAdminLoginMode(false);
+      setAdminEntryRequested(false);
       setShowLogoutDialog(false);
       setVista('inicio');
       setTourStep(-1);
@@ -2018,48 +2021,32 @@ export default function App() {
   };
   const ScreenBackdropIcon = backdropIcons[vista] || LayoutDashboard;
 
-  if (!isLoggedIn || adminLoginMode) {
+  if (!isLoggedIn) {
     return (
-      <main className={`login-screen ${adminLoginMode ? 'admin-login-screen' : 'login-split-screen'}`}>
+      <main className="login-screen login-split-screen">
         <div className="login-backdrop-orb login-orb-one" />
         <div className="login-backdrop-orb login-orb-two" />
         <div className="login-icon login-icon-calendar"><CalendarDays /></div>
         <div className="login-icon login-icon-activity"><Activity /></div>
         <div className="login-icon login-icon-food"><Salad /></div>
         <div className="login-icon login-icon-finance"><Wallet /></div>
-        {!adminLoginMode && (
-          <button className="login-admin-entry" type="button" onClick={openAdminLogin}>
-            <ShieldCheck size={16} /> Admin
-          </button>
-        )}
+        <button className="login-admin-entry" type="button" onClick={openAdminEntry}>
+          <ShieldCheck size={16} /> Admin
+        </button>
         <div className="login-layout">
         <section className="login-card" aria-labelledby="login-title">
-          {adminLoginMode && (
-            <button className="login-admin-back" type="button" onClick={returnToHome}>
-              <ChevronLeft size={16} /> Volver a SyncLife
-            </button>
-          )}
           <img className="login-logo" src="/synclife-logo.png" alt="Logo de SyncLife OS" />
-          {!adminLoginMode && (
-            <div className="login-icon-row" aria-hidden="true">
-              {[CalendarDays, Activity, Salad, Wallet].map((Icon, index) => (
-                <span className={`login-icon-badge login-icon-badge-${index}`} key={index}><Icon size={17} /></span>
-              ))}
-            </div>
-          )}
-          <span className="section-kicker">{adminLoginMode ? 'ACCESO RESTRINGIDO' : authMode === 'register' ? 'ÚNETE A SYNCLIFE' : 'TU ESPACIO PERSONAL'}</span>
-          <h1 id="login-title">{adminLoginMode ? 'Administración' : authMode === 'register' ? 'Crea tu cuenta' : 'Inicio de sesión'}</h1>
-          <p>{adminLoginMode
-            ? 'Inicia sesión con una cuenta autorizada de administrador.'
-            : authMode === 'register'
-              ? 'Crea tu cuenta y organiza tus hábitos, bienestar y finanzas.'
-              : 'Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.'}</p>
+          <span className="section-kicker">{authMode === 'register' ? 'ÚNETE A SYNCLIFE' : 'TU ESPACIO PERSONAL'}</span>
+          <h1 id="login-title">{authMode === 'register' ? 'Crea tu cuenta' : 'Inicio de sesión'}</h1>
+          <p>{authMode === 'register'
+            ? 'Crea tu cuenta y organiza tus hábitos, bienestar y finanzas.'
+            : 'Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.'}</p>
           {!authReady && <p className="login-auth-status" role="status">Comprobando tu sesión…</p>}
           {authError && <p className="login-auth-error" role="alert">{authError}</p>}
           {authNotice && <p className="login-auth-status" role="status">{authNotice}</p>}
           {!firebaseConfigured && <p className="login-auth-error" role="alert">Falta configurar Firebase. Completa las variables VITE_FIREBASE_* en frontend/.env.local y reinicia Vite.</p>}
           <form className="login-auth-form" onSubmit={submitEmailAuth}>
-            {!adminLoginMode && authMode === 'register' && (
+            {authMode === 'register' && (
               <label className="login-field">
                 <span>Nombre</span>
                 <input
@@ -2090,16 +2077,16 @@ export default function App() {
               <span>Contraseña</span>
               <input
                 type="password"
-                autoComplete={!adminLoginMode && authMode === 'register' ? 'new-password' : 'current-password'}
+                autoComplete={authMode === 'register' ? 'new-password' : 'current-password'}
                 value={authPassword}
                 onChange={(event) => setAuthPassword(event.target.value)}
-                placeholder={!adminLoginMode && authMode === 'register' ? 'Mínimo 6 caracteres' : 'Tu contraseña'}
+                placeholder={authMode === 'register' ? 'Mínimo 6 caracteres' : 'Tu contraseña'}
                 minLength={6}
                 required
                 disabled={!authReady || authLoading || !firebaseConfigured}
               />
             </label>
-            {!adminLoginMode && authMode === 'register' && (
+            {authMode === 'register' && (
               <label className="login-field">
                 <span>Confirmar contraseña</span>
                 <input
@@ -2126,37 +2113,30 @@ export default function App() {
             )}
             <button className="login-submit" type="submit" disabled={!authReady || authLoading || !firebaseConfigured}>
               {authLoading
-                ? (!adminLoginMode && authMode === 'register' ? 'Creando cuenta…' : 'Ingresando…')
-                : (!adminLoginMode && authMode === 'register' ? 'Crear cuenta' : 'Iniciar sesión')}
+                ? (authMode === 'register' ? 'Creando cuenta…' : 'Ingresando…')
+                : (authMode === 'register' ? 'Crear cuenta' : 'Iniciar sesión')}
             </button>
           </form>
-          {!adminLoginMode && (
-            <>
-              <div className="login-divider"><span>o continúa con</span></div>
-              <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
-                <span className="google-mark" aria-hidden="true">G</span>
-                {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
-              </button>
-              <p className="login-mode-switch">
-                {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Eres nuevo?'}
-                {' '}
-                <button className="login-text-button" type="button" onClick={() => changeAuthMode(authMode === 'register' ? 'login' : 'register')}>
-                  {authMode === 'register' ? 'Inicia sesión' : 'Crea una cuenta'}
-                </button>
-              </p>
-            </>
-          )}
-          {!adminLoginMode && (!firebaseConfigured || authError) && (
+          <div className="login-divider"><span>o continúa con</span></div>
+          <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
+            <span className="google-mark" aria-hidden="true">G</span>
+            {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
+          </button>
+          <p className="login-mode-switch">
+            {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Eres nuevo?'}
+            {' '}
+            <button className="login-text-button" type="button" onClick={() => changeAuthMode(authMode === 'register' ? 'login' : 'register')}>
+              {authMode === 'register' ? 'Inicia sesión' : 'Crea una cuenta'}
+            </button>
+          </p>
+          {(!firebaseConfigured || authError) && (
             <button className="login-submit secondary-login-button" type="button" onClick={enterDemoWorkspace}>
               Usar vista demo
             </button>
           )}
-          <small>{adminLoginMode
-            ? 'El acceso administrativo se verifica con el rol asignado en Firebase.'
-            : 'Con Google o correo, tus datos de SyncLife se guardan por cuenta en este navegador.'}</small>
+          <small>Con Google o correo, tus datos de SyncLife se guardan por cuenta en este navegador.</small>
         </section>
-        {!adminLoginMode && (
-          <aside className="login-art-panel" aria-label="Bienestar en equilibrio">
+        <aside className="login-art-panel" aria-label="Bienestar en equilibrio">
             <div className="login-art-glow" />
             <div className="login-art-stars" aria-hidden="true" />
             <div className="login-art-moon" aria-hidden="true" />
@@ -2170,8 +2150,7 @@ export default function App() {
             </div>
             <div className="login-art-orbit login-art-orbit-one" aria-hidden="true" />
             <div className="login-art-orbit login-art-orbit-two" aria-hidden="true" />
-          </aside>
-        )}
+        </aside>
         </div>
       </main>
     );

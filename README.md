@@ -28,15 +28,15 @@ El panel aparece en la navegación solo cuando el usuario tiene la custom claim 
 
 1. Habilita **Firestore Database** en el mismo proyecto Firebase de Authentication. Desde la raíz del repositorio, publica las reglas de `firestore.rules` con Firebase CLI (`firebase deploy --only firestore:rules --project synclife-os-b2daf`) o pégalas en **Firestore Database → Rules** y pulsa **Publicar**. Las reglas permiten a administradores leer los contadores agregados; las escrituras solo se aceptan desde el backend con Admin SDK. El resto de documentos no es accesible desde clientes.
 2. Proporciona al backend una cuenta de servicio privada del mismo proyecto. En Render define `FIREBASE_PROJECT_ID=synclife-os-b2daf` y `FIREBASE_SERVICE_ACCOUNT_JSON` con el JSON de la cuenta de servicio. Asigna solo permisos de administración de Firebase Authentication y acceso a Firestore que requiera el servicio. Para desarrollo local puedes usar `GOOGLE_APPLICATION_CREDENTIALS` con la ruta absoluta al archivo de credenciales. No guardes el JSON en Git ni en el frontend.
-3. En terminal, busca el UID de tu cuenta en **Firebase Console → Authentication → Users** y ejecuta:
+3. Para preparar el primer administrador, crea primero la cuenta con el inicio de sesión normal de SyncLife (con el correo indicado o Google usando ese mismo correo). Después ejecuta el comando con su correo o UID:
 
    ```powershell
    npm ci --prefix backend
-   npm --prefix backend run set-admin -- UID_DE_TU_CUENTA
+   npm --prefix backend run set-admin -- admin@gmail.com
    ```
 
-   El comando requiere las mismas credenciales Admin SDK. Cierra sesión y vuelve a entrar (o usa «Volver a comprobar mi rol») para refrescar el token. Vuelve a desplegar el backend después de configurarle las variables.
-4. Inicia la app con `npm run dev`. El panel contiene Resumen, Usuarios, Estado de APIs y Seguridad. Bloquear deshabilita la cuenta en Firebase y revoca sus tokens; eliminar borra la cuenta de Firebase Auth, su registro en PostgreSQL y sus contadores agregados. Los datos personales de la app están en `localStorage` del dispositivo y no pueden borrarse remotamente desde el panel.
+   El comando requiere credenciales Firebase Admin en la terminal, por ejemplo `GOOGLE_APPLICATION_CREDENTIALS` con una cuenta de servicio del mismo proyecto. Nunca pegues sus secretos en el repositorio ni en el navegador. Si la cuenta todavía no existe, créala antes de ejecutar el comando. Cierra sesión y vuelve a entrar para refrescar la claim.
+4. Después, el administrador inicia sesión desde el formulario normal de SyncLife (correo/contraseña o Google) y elige **Admin**. En **Usuarios**, puede otorgar el rol a cuentas habilitadas; el servidor asigna la custom claim y sincroniza el rol con PostgreSQL. La cuenta promovida debe volver a iniciar sesión para actualizar su token. Administradores no se pueden bloquear ni eliminar desde el panel. Inicia la app con `npm run dev`. El panel contiene Resumen, Usuarios, Estado de APIs y Seguridad. Los datos personales de la app permanecen en `localStorage` del dispositivo y no pueden borrarse remotamente desde el panel.
 
 Los contadores de comidas y rutinas empiezan desde que se habilita esta versión; los registros históricos locales no se pueden reconstruir. Solo se envían el tipo de actividad y un ID opaco para deduplicarla, nunca el contenido de comidas, peso, edad, talla, finanzas o calendario. «Activos hoy» se estima con el último inicio de sesión de Firebase (día UTC). La comprobación de YouTube usa oEmbed; la app usa iframes y no consume cuota de YouTube Data API. El consumo del clima cuenta solicitudes a proveedores desde que arrancó el proceso del backend y se reinicia al desplegar.
 

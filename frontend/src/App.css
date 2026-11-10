@@ -528,8 +528,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .login-admin-entry { position: absolute; z-index: 2; top: 22px; right: 24px; display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 15px; border: 1px solid rgba(246,241,229,.48); border-radius: 20px; color: #f8f3e6; background: rgba(246,241,229,.12); backdrop-filter: blur(8px); cursor: pointer; font-size: 11px; font-weight: 700; transition: background .18s ease, transform .18s ease; }
 .login-admin-entry:hover { transform: translateY(-1px); background: rgba(246,241,229,.22); }
 .login-card { position: relative; z-index: 1; display: grid; width: min(100%, 440px); justify-items: start; padding: 30px; border: 1px solid rgba(255, 255, 255, .72); border-radius: 22px; background: #f6f1e5; box-shadow: 0 28px 90px rgba(12, 38, 26, .34), inset 0 0 0 5px rgba(226, 215, 189, .18); }
-.login-admin-back { display: inline-flex; align-items: center; gap: 3px; margin: 0 0 12px; padding: 5px 0; border: 0; color: #27533e; background: transparent; cursor: pointer; font-size: 11px; font-weight: 700; }
-.login-admin-back:hover { color: #193f30; text-decoration: underline; text-underline-offset: 3px; }
 .login-logo { display: block; width: 156px; height: 156px; margin: 0 auto 9px; object-fit: contain; image-rendering: auto; }
 .login-icon-row { display: flex; justify-self: center; gap: 9px; margin: 0 auto 15px; }
 .login-icon-badge { display: grid; width: 31px; height: 31px; place-items: center; border: 1px solid rgba(39,83,62,.13); border-radius: 9px; color: #27533e; background: rgba(255,255,255,.55); }
@@ -655,8 +653,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
   .login-art-glow { top: 3%; right: 4%; width: 220px; }
   .login-art-hill { height: 70%; }
 }
-.admin-login-screen .login-layout { position: relative; z-index: 1; width: min(100%, 440px); margin: auto; }
-.admin-login-screen .login-card { width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
