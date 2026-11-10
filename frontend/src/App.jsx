@@ -4,7 +4,7 @@ import {
   Check, CheckCircle2, ChevronLeft, ChevronRight, Circle, CircleDollarSign,
   ClipboardList, CloudSun, Download, Dumbbell, Flame, HelpCircle, Home, LayoutDashboard, LogOut, Pause, Play,
   ListTodo, MapPin, Pencil, Plus, Salad, Save, Sparkles, Star, Target, Trash2, Utensils, Wallet,
-  Shirt, Pill, ShoppingBag, Coffee, RefreshCw, Search, ShieldCheck, Users, Lock, Unlock,
+  Shirt, Pill, ShoppingBag, Coffee, RefreshCw, Search, ShieldCheck, Users, Lock, Unlock, Menu, X,
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import {
@@ -85,16 +85,29 @@ async function syncAccountWithBackend(user) {
   }
   return result;
 }
-function AdminPanel({ user, isAdmin, onRefreshClaim }) {
+function AdminPanel({ user, isAdmin, onRefreshClaim, onExit, onBack }) {
   const [section, setSection] = useState('summary');
   const [metrics, setMetrics] = useState(null);
   const [users, setUsers] = useState([]);
+  const [adminAccounts, setAdminAccounts] = useState([]);
   const [nextPageToken, setNextPageToken] = useState(null);
   const [search, setSearch] = useState('');
+  const [userStatusFilter, setUserStatusFilter] = useState('all');
+  const [providerFilter, setProviderFilter] = useState('all');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [records, setRecords] = useState([]);
+  const [recordNextPageToken, setRecordNextPageToken] = useState(null);
+  const [recordsLoaded, setRecordsLoaded] = useState(false);
+  const [recordSearch, setRecordSearch] = useState('');
+  const [recordDateFilter, setRecordDateFilter] = useState('');
+  const [helpOpen, setHelpOpen] = useState('');
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [confirming, setConfirming] = useState(false);
   const [apis, setApis] = useState(null);
   const [apisLoading, setApisLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingRecords, setLoadingRecords] = useState(false);
   const [busyUid, setBusyUid] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -103,13 +116,18 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
     setLoading(true);
     setError('');
     try {
-      const [nextMetrics, firstPage] = await Promise.all([
+      const [nextMetrics, firstPage, firstRecordsPage] = await Promise.all([
         adminRequest(user, '/api/admin/metrics'),
         adminRequest(user, '/api/admin/users'),
+        adminRequest(user, '/api/admin/records'),
       ]);
       setMetrics(nextMetrics);
+      setAdminAccounts(nextMetrics.admins || []);
       setUsers(firstPage.users);
       setNextPageToken(firstPage.nextPageToken);
+      setRecords(firstRecordsPage.records);
+      setRecordNextPageToken(firstRecordsPage.nextPageToken);
+      setRecordsLoaded(true);
       return true;
     } catch (requestError) {
       console.error('No se pudo cargar el panel administrativo:', requestError);
@@ -137,9 +155,31 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
     }
   };
 
+  const loadRecords = async (append = false) => {
+    setLoadingRecords(true);
+    setError('');
+    try {
+      const cursor = append ? recordNextPageToken : null;
+      const path = cursor
+        ? `/api/admin/records?pageToken=${encodeURIComponent(cursor)}`
+        : '/api/admin/records';
+      const page = await adminRequest(user, path);
+      setRecords((current) => append ? [...current, ...page.records] : page.records);
+      setRecordNextPageToken(page.nextPageToken);
+      setRecordsLoaded(true);
+    } catch (requestError) {
+      console.error('No se pudieron cargar los registros diarios:', requestError);
+      setError(requestError.message);
+    } finally {
+      setLoadingRecords(false);
+    }
+  };
+
   const openSection = (nextSection) => {
     setSection(nextSection);
     setNotice('');
+    setHelpOpen('');
+    if (nextSection === 'records' && !recordsLoaded) loadRecords();
     if (nextSection === 'apis' && !apis) refreshApis();
   };
 
@@ -159,10 +199,8 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
     }
   };
 
-  const updateAccountStatus = async (account) => {
-    const disabled = !account.disabled;
+  const updateAccountStatus = async (account, disabled) => {
     const action = disabled ? 'bloquear' : 'desbloquear';
-    if (!window.confirm(`¿Seguro que deseas ${action} la cuenta de ${account.email || account.name}?`)) return;
     setBusyUid(account.uid);
     setError('');
     setNotice('');
@@ -181,34 +219,14 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
     }
   };
 
-  const grantAdminRole = async (account) => {
-    if (!window.confirm(`¿Dar permisos de administrador a ${account.email || account.name}? Tendrá acceso al panel y podrá administrar otras cuentas.`)) return;
-    setBusyUid(account.uid);
-    setError('');
-    setNotice('');
-    try {
-      const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}/admin`, {
-        method: 'PATCH',
-        body: JSON.stringify({ admin: true }),
-      });
-      setUsers((current) => current.map((item) => item.uid === account.uid ? result.user : item));
-      setNotice(result.warning || `Permisos de administrador asignados a ${account.email || account.name}. Debe volver a iniciar sesión para actualizar su acceso.`);
-    } catch (requestError) {
-      console.error('No se pudieron asignar permisos de administrador:', requestError);
-      setError(requestError.message);
-    } finally {
-      setBusyUid('');
-    }
-  };
-
   const deleteAccount = async (account) => {
-    if (!window.confirm(`Eliminar permanentemente la cuenta ${account.email || account.name}? Esta acción no se puede deshacer. Los datos guardados localmente en el dispositivo del usuario no se borran.`)) return;
     setBusyUid(account.uid);
     setError('');
     setNotice('');
     try {
       const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}`, { method: 'DELETE' });
       setUsers((current) => current.filter((item) => item.uid !== account.uid));
+      setRecords((current) => current.filter((item) => !item.id.startsWith(`${account.uid}_`)));
       const refreshed = await refreshOverview();
       setNotice(result?.warning || (refreshed
         ? 'Cuenta eliminada. Los registros de uso agregado asociados también se borraron.'
@@ -224,55 +242,183 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
   const normalizedSearch = search.trim().toLocaleLowerCase('es');
   const filteredUsers = users.filter((account) => (
     `${account.name} ${account.email}`.toLocaleLowerCase('es').includes(normalizedSearch)
+  ) && (userStatusFilter === 'all'
+    || (userStatusFilter === 'active' && !account.disabled)
+    || (userStatusFilter === 'blocked' && account.disabled))
+    && (providerFilter === 'all'
+      || (providerFilter === 'google' && account.providers?.includes('google.com'))
+      || (providerFilter === 'email' && account.providers?.includes('password'))));
+  const normalizedRecordSearch = recordSearch.trim().toLocaleLowerCase('es');
+  const filteredRecords = records.filter((record) => (
+    (!recordDateFilter || record.date === recordDateFilter)
+    && (!normalizedRecordSearch
+      || `${record.name} ${record.email} ${record.date} ${record.score ?? ''}`
+        .toLocaleLowerCase('es').includes(normalizedRecordSearch))
   ));
   const formatApiDate = (value) => value
     ? new Intl.DateTimeFormat('es-PE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
     : 'Sin datos';
+  const formatDay = (value) => value
+    ? new Intl.DateTimeFormat('es-PE', { dateStyle: 'medium' }).format(new Date(`${value}T12:00:00`))
+    : 'Sin fecha';
+  const formatDelta = (current, previous, unit = '') => {
+    if (current === null || current === undefined || previous === null || previous === undefined) return 'Sin comparación anterior';
+    const delta = Number((Number(current) - Number(previous)).toFixed(1));
+    if (!delta) return 'Sin cambio frente a la semana anterior';
+    return `${delta > 0 ? '+' : ''}${delta}${unit} frente a la semana anterior`;
+  };
+  const helpCopy = {
+    summary: 'Cifras generales de las cuentas y de los registros que se guardan en Firebase.',
+    users: 'Busca una cuenta, revisa su estado y bloquéala o elimínala si hace falta.',
+    records: 'Registros diarios guardados en Firebase. Solo se muestra el puntaje y los datos básicos de la cuenta.',
+    admins: 'La cuenta que tiene permiso para administrar SyncLife. El permiso se configura en el servidor.',
+    apis: 'Comprueba si los servicios externos que usa SyncLife están disponibles.',
+    security: 'El panel y sus datos están protegidos por el permiso de administrador verificado en el servidor.',
+  };
+  const sectionHeading = (kicker, title, description) => (
+    <div className="admin-section-heading">
+      <div><span className="section-kicker">{kicker}</span><h2>{title}</h2><p>{description}</p></div>
+      <button type="button" className="admin-help-button" aria-label={`Ayuda: ${title}`}
+        aria-expanded={helpOpen === section} onClick={() => setHelpOpen((current) => current === section ? '' : section)}>
+        <HelpCircle size={16} /><span>¿Qué es esto?</span>
+      </button>
+    </div>
+  );
+  const performConfirmedAction = async () => {
+    if (!confirmAction) return;
+    setConfirming(true);
+    if (confirmAction.type === 'delete') {
+      await deleteAccount(confirmAction.account);
+    } else {
+      await updateAccountStatus(confirmAction.account, confirmAction.disabled);
+    }
+    setConfirming(false);
+    setConfirmAction(null);
+  };
   const sections = [
     { id: 'summary', label: 'Resumen', icon: LayoutDashboard },
     { id: 'users', label: 'Usuarios', icon: Users },
-    { id: 'apis', label: 'Estado de APIs', icon: Activity },
-    { id: 'security', label: 'Seguridad', icon: ShieldCheck },
+    { id: 'admins', label: 'Administradores', icon: ShieldCheck },
+    { id: 'records', label: 'Registros recientes', icon: ClipboardList },
   ];
 
   return (
     <section className="admin-panel" aria-label="Panel administrativo">
-      <nav className="admin-tabs" aria-label="Secciones administrativas">
-        {sections.map(({ id, label, icon: Icon }) => (
-          <button key={id} type="button" className={`admin-tab ${section === id ? 'active' : ''}`} onClick={() => openSection(id)}>
-            <Icon size={16} /><span>{label}</span>
+      <aside className="admin-sidebar">
+        <div className="admin-brand">
+          <span className="admin-brand-mark"><Activity size={21} /></span>
+          <span><strong>SyncLife OS</strong><small>Administración</small></span>
+        </div>
+        <span className="admin-nav-label">MENÚ PRINCIPAL</span>
+        <nav className={`admin-nav ${mobileMenuOpen ? 'open' : ''}`} aria-label="Secciones administrativas">
+          {sections.map(({ id, label, icon: Icon }) => (
+            <button key={id} type="button" className={`admin-nav-item ${section === id ? 'active' : ''}`} onClick={() => { openSection(id); setMobileMenuOpen(false); }}>
+              <Icon size={17} /><span>{label}</span>
+              {id === 'users' && metrics && <small>{metrics.totalUsers.toLocaleString('es-PE')}</small>}
+            </button>
+          ))}
+          <span className="admin-nav-label admin-tools-label">ESTADO Y SEGURIDAD</span>
+          {[
+            { id: 'apis', label: 'Servicios externos', icon: Activity },
+            { id: 'security', label: 'Protección de datos', icon: ShieldCheck },
+          ].map(({ id, label, icon: Icon }) => (
+            <button key={id} type="button" className={`admin-nav-item ${section === id ? 'active' : ''}`} onClick={() => { openSection(id); setMobileMenuOpen(false); }}>
+              <Icon size={17} /><span>{label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="admin-sidebar-bottom">
+          <div className="admin-protection"><ShieldCheck size={17} /><span><strong>Acceso protegido</strong><small>Sesión de administrador</small></span></div>
+          <button type="button" className="admin-back-link" onClick={onBack}>
+            <ChevronLeft size={16} />Volver a SyncLife
           </button>
-        ))}
-        <button type="button" className="admin-refresh" onClick={section === 'apis' ? refreshApis : refreshOverview} aria-label="Actualizar panel">
-          <RefreshCw size={16} />
-        </button>
-      </nav>
+          <div className="admin-sidebar-account"><span>{(user?.displayName || user?.email || 'A').charAt(0).toUpperCase()}</span><div><strong>{user?.displayName || 'Administrador'}</strong><small>{user?.email || 'Cuenta verificada'}</small></div></div>
+        </div>
+      </aside>
 
-      {error && <p className="admin-message is-error" role="alert">{error}</p>}
-      {notice && <p className="admin-message" role="status">{notice}</p>}
-      {loading && section !== 'apis' && <p className="admin-loading" role="status">Cargando datos administrativos…</p>}
+      <div className="admin-workspace">
+        <header className="admin-topbar">
+          <div className="admin-topbar-title">
+            <button type="button" className="admin-mobile-menu" onClick={() => setMobileMenuOpen((open) => !open)} aria-expanded={mobileMenuOpen} aria-label="Abrir menú de administración"><Menu size={19} /></button>
+            <span><span className="admin-breadcrumb">SyncLife OS <ChevronRight size={13} /> Administración</span><strong>{sections.find((item) => item.id === section)?.label}</strong></span>
+          </div>
+          <div className="admin-top-actions">
+            <span className="admin-session-badge"><i />Sesión protegida</span>
+            <button type="button" className="admin-top-button" onClick={() => section === 'apis' ? refreshApis() : refreshOverview()} disabled={section === 'apis' ? apisLoading : loading}><RefreshCw size={15} />Actualizar</button>
+            <button type="button" className="admin-exit-button" onClick={onExit}><LogOut size={15} />Salir</button>
+          </div>
+        </header>
+        <div className="admin-content">
+          {helpOpen && <p className="admin-help-copy" role="note">{helpCopy[helpOpen]}</p>}
+          {error && <p className="admin-message is-error" role="alert">{error}</p>}
+          {notice && <p className="admin-message" role="status">{notice}</p>}
+          {loading && <p className="admin-loading" role="status">Actualizando datos de Firebase…</p>}
 
       {section === 'summary' && !loading && metrics && (
         <div className="admin-section">
           <div className="admin-section-heading">
-            <div><span className="section-kicker">VISTA GENERAL</span><h2>Resumen de la comunidad</h2></div>
-            <span className="admin-updated">Usuarios activos: últimos inicios de sesión de hoy (UTC)</span>
+            <div><span className="section-kicker">VISTA GENERAL</span><h2>Hola, Administrador</h2>
+              <p>{new Intl.DateTimeFormat('es-PE', { dateStyle: 'full' }).format(new Date())}. Aquí tienes lo más importante.</p>
+            </div>
+            <div className="admin-heading-actions">
+              <span className="admin-updated">Actualizado {formatApiDate(metrics.updatedAt)}</span>
+              <button type="button" className="admin-help-button" aria-label="Ayuda del resumen"
+                aria-expanded={helpOpen === 'summary'} onClick={() => setHelpOpen((current) => current === 'summary' ? '' : 'summary')}>
+                <HelpCircle size={16} /><span>Ayuda</span>
+              </button>
+            </div>
           </div>
           <div className="admin-metrics">
             {[
-              { label: 'Usuarios totales', value: metrics?.totalUsers, icon: Users, tone: 'green' },
-              { label: 'Nuevos esta semana', value: metrics?.newUsersThisWeek, icon: Sparkles, tone: 'amber' },
-              { label: 'Activos hoy', value: metrics?.activeToday, icon: Activity, tone: 'blue' },
-              { label: 'Comidas registradas', value: metrics?.totalMeals, icon: Salad, tone: 'green' },
-              { label: 'Rutinas generadas', value: metrics?.totalRoutines, icon: Dumbbell, tone: 'violet' },
-            ].map(({ label, value, icon: Icon, tone }) => (
+              { label: 'Usuarios registrados', value: metrics.totalUsers, description: 'Cuentas creadas en Firebase', change: formatDelta(metrics.usersThisWeek, metrics.usersPreviousWeek, ' cuentas'), icon: Users, tone: 'green' },
+              { label: 'Registros sincronizados', value: metrics.totalRecords ?? 0, description: 'Días guardados en Firebase', change: formatDelta(metrics.recordsThisWeek, metrics.recordsPreviousWeek, ' registros'), icon: ClipboardList, tone: 'blue' },
+              { label: 'Registros de hoy', value: metrics.recordsToday ?? 0, description: 'Personas que guardaron su día', change: formatDelta(metrics.recordsToday, metrics.recordsSameDayPreviousWeek, ' registros'), icon: Activity, tone: 'amber' },
+              { label: 'Puntaje promedio', value: metrics.averageScore == null ? '—' : `${metrics.averageScore}/100`, description: 'Promedio de los últimos 7 días', change: formatDelta(metrics.averageScore, metrics.previousAverageScore, ' puntos'), icon: BarChart3, tone: 'violet' },
+            ].map(({ label, value, description, change, icon: Icon, tone }) => (
               <article className="admin-metric-card" key={label}>
                 <span className={`admin-metric-icon ${tone}`}><Icon size={18} /></span>
-                <span>{label}</span><strong>{Number(value || 0).toLocaleString('es-PE')}</strong>
+                <span>{label}</span><strong>{typeof value === 'number' ? value.toLocaleString('es-PE') : value}</strong>
+                <small>{description}</small><span className="admin-metric-change">{change}</span>
               </article>
             ))}
           </div>
-          <p className="admin-footnote">Los totales de comidas y rutinas cuentan únicamente registros nuevos desde que se habilitó el seguimiento. Los datos personales de salud y finanzas no se recopilan ni se muestran aquí.</p>
+          <div className="admin-overview-grid">
+            <section className="admin-chart-card" aria-label="Registros diarios de los últimos 7 días">
+              <div><h3>Actividad de los últimos 7 días</h3><p>Cada barra muestra cuántos días se guardaron.</p></div>
+              <div className="admin-week-chart">
+                {(metrics.recordsLast7Days || []).map((day) => {
+                  const maxCount = Math.max(1, ...(metrics.recordsLast7Days || []).map((item) => item.count));
+                  return (
+                    <div className="admin-chart-day" key={day.date} title={`${formatDay(day.date)}: ${day.count} registros`}>
+                      <strong>{day.count}</strong><span className="admin-chart-track"><i style={{ height: `${Math.max(7, (day.count / maxCount) * 100)}%` }} /></span>
+                      <small>{new Intl.DateTimeFormat('es-PE', { weekday: 'short' }).format(new Date(`${day.date}T12:00:00`))}</small>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+            <section className="admin-recent-card">
+              <div className="admin-recent-heading"><span><h3>Actividad reciente</h3><p>Últimos registros guardados</p></span><button type="button" onClick={() => openSection('records')}>Ver todo<ChevronRight size={14} /></button></div>
+              {records.slice(0, 5).length ? <div className="admin-recent-list">
+                {records.slice(0, 5).map((record) => (
+                  <article className="admin-recent-item" key={record.id}>
+                    <span className="admin-recent-avatar">{(record.name || record.email || '?').charAt(0).toUpperCase()}</span>
+                    <span className="admin-recent-detail"><strong>{record.name || 'Sin nombre'}</strong><small>{record.email || 'Cuenta SyncLife'}</small></span>
+                    <span className={`admin-record-score ${record.score == null ? '' : record.score >= 70 ? 'high' : record.score >= 40 ? 'medium' : 'low'}`}>{record.score ?? '—'}</span>
+                  </article>
+                ))}
+              </div> : <p className="admin-recent-empty">Aún no hay registros sincronizados. Aparecerán cuando alguien guarde su día.</p>}
+            </section>
+          </div>
+          <div className="admin-quick-actions">
+            <h3>Acciones rápidas</h3>
+            <div>
+              <button type="button" className="admin-quick-button" onClick={() => openSection('users')}><Users size={17} />Ver usuarios</button>
+              <button type="button" className="admin-quick-button" onClick={() => openSection('records')}><ClipboardList size={17} />Ver registros recientes</button>
+              <button type="button" className="admin-quick-button" onClick={refreshOverview} disabled={loading}><RefreshCw size={17} />Actualizar datos</button>
+            </div>
+          </div>
+          <p className="admin-footnote">Los registros diarios empiezan a contabilizarse cuando se guardan en Firebase. Los datos de salud y finanzas no se muestran aquí.</p>
         </div>
       )}
       {section === 'summary' && !loading && !metrics && (
@@ -281,31 +427,41 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
 
       {section === 'users' && (
         <div className="admin-section">
-          <div className="admin-section-heading">
-            <div><span className="section-kicker">CUENTAS</span><h2>Administrar usuarios</h2></div>
+          {sectionHeading('CUENTAS', 'Usuarios', 'Busca una cuenta y revisa su estado.')}
+          <div className="admin-users-toolbar">
             <label className="admin-search"><Search size={16} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar nombre o correo" aria-label="Buscar usuario" /></label>
+            <div className="admin-filter-group" aria-label="Filtrar estado de usuarios">
+              {[['all', 'Todos'], ['active', 'Activos'], ['blocked', 'Bloqueados']].map(([value, label]) => (
+                <button key={value} type="button" className={userStatusFilter === value ? 'active' : ''}
+                  aria-pressed={userStatusFilter === value} onClick={() => setUserStatusFilter(value)}>{label}</button>
+              ))}
+            </div>
+            <div className="admin-filter-group" aria-label="Filtrar tipo de cuenta">
+              {[['all', 'Todas las cuentas'], ['google', 'Google'], ['email', 'Correo']].map(([value, label]) => (
+                <button key={value} type="button" className={providerFilter === value ? 'active' : ''}
+                  aria-pressed={providerFilter === value} onClick={() => setProviderFilter(value)}>{label}</button>
+              ))}
+            </div>
           </div>
           <div className="admin-table-wrap">
             <table className="admin-users-table">
-              <thead><tr><th>Usuario</th><th>Correo</th><th>Registro</th><th>Estado</th><th>Acciones</th></tr></thead>
+              <thead><tr><th>Usuario</th><th>Correo</th><th>Acceso con</th><th>Registro</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>
                 {filteredUsers.map((account) => (
                   <tr key={account.uid}>
-                    <td data-label="Usuario">{account.name}</td>
+                    <td data-label="Usuario"><span className={account.name === 'Sin nombre' ? 'admin-user-no-name' : ''}>{account.name || 'Sin nombre'}</span></td>
                     <td data-label="Correo">{account.email || '—'}</td>
+                    <td data-label="Acceso con"><span className={`admin-provider-tag ${account.providers?.includes('google.com') ? 'google' : ''}`}>{account.providers?.includes('google.com') ? 'Google' : account.providers?.includes('password') ? 'Correo' : 'Otro'}</span></td>
                     <td data-label="Registro">{formatApiDate(account.createdAt)}</td>
                     <td data-label="Estado"><span className={`admin-user-state ${account.disabled ? 'blocked' : 'enabled'}`}>{account.disabled ? 'Bloqueado' : 'Activo'}{account.admin ? ' · Admin' : ''}</span></td>
                     <td data-label="Acciones">
                       {account.admin ? <span className="admin-protected-user">Admin · Cuenta protegida</span> : (
                         <div className="admin-user-actions">
-                          <button type="button" className="admin-action-button" onClick={() => grantAdminRole(account)} disabled={busyUid === account.uid || account.disabled}>
-                            <ShieldCheck size={14} />Dar admin
-                          </button>
-                          <button type="button" className="admin-action-button" onClick={() => updateAccountStatus(account)} disabled={busyUid === account.uid}>
+                          <button type="button" className="admin-action-button" onClick={() => setConfirmAction({ type: 'status', account, disabled: !account.disabled })} disabled={busyUid === account.uid}>
                             {account.disabled ? <Unlock size={14} /> : <Lock size={14} />}
                             {account.disabled ? 'Desbloquear' : 'Bloquear'}
                           </button>
-                          <button type="button" className="admin-action-button danger" onClick={() => deleteAccount(account)} disabled={busyUid === account.uid}>
+                          <button type="button" className="admin-action-button danger" onClick={() => setConfirmAction({ type: 'delete', account })} disabled={busyUid === account.uid}>
                             <Trash2 size={14} />Eliminar
                           </button>
                         </div>
@@ -313,7 +469,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
                     </td>
                   </tr>
                 ))}
-                {!filteredUsers.length && <tr><td className="admin-empty" colSpan="5">{users.length ? 'No hay coincidencias en las cuentas cargadas.' : error ? 'No se pudo cargar la lista de cuentas.' : 'No se encontraron cuentas.'}</td></tr>}
+                {!filteredUsers.length && <tr><td className="admin-empty" colSpan="6">{users.length ? 'No hay cuentas que coincidan con la búsqueda y el filtro.' : error ? 'No se pudo cargar la lista de cuentas.' : 'Aún no hay usuarios. Aparecerán aquí cuando alguien se registre.'}</td></tr>}
               </tbody>
             </table>
           </div>
@@ -321,12 +477,56 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
         </div>
       )}
 
+      {section === 'records' && (
+        <div className="admin-section">
+          {sectionHeading('REGISTROS', 'Registros diarios', 'Consulta los puntajes que se han guardado en Firebase.')}
+          <div className="admin-users-toolbar">
+            <label className="admin-search"><Search size={16} /><input type="search" value={recordSearch} onChange={(event) => setRecordSearch(event.target.value)} placeholder="Buscar nombre, correo o fecha" aria-label="Buscar registros" /></label>
+            <label className="admin-date-filter"><span>Fecha</span><input type="date" value={recordDateFilter} onChange={(event) => setRecordDateFilter(event.target.value)} aria-label="Filtrar registros por fecha" /></label>
+          </div>
+          {loadingRecords ? <p className="admin-loading" role="status">Cargando registros de Firebase…</p> : (
+            <div className="admin-table-wrap">
+              <table className="admin-users-table admin-records-table">
+                <thead><tr><th>Persona</th><th>Correo</th><th>Fecha</th><th>Puntaje</th></tr></thead>
+                <tbody>
+                  {filteredRecords.map((record) => (
+                    <tr key={record.id}>
+                      <td data-label="Persona">{record.name || 'Sin nombre'}</td>
+                      <td data-label="Correo">{record.email || '—'}</td>
+                      <td data-label="Fecha">{formatDay(record.date)}</td>
+                      <td data-label="Puntaje"><span className={`admin-record-score ${record.score == null ? '' : record.score >= 70 ? 'high' : record.score >= 40 ? 'medium' : 'low'}`}>{record.score ?? '—'}{record.score == null ? '' : '/100'}</span></td>
+                    </tr>
+                  ))}
+                  {!filteredRecords.length && <tr><td className="admin-empty" colSpan="4">{records.length ? 'No hay registros que coincidan con la búsqueda o fecha.' : 'Aún no hay registros diarios sincronizados. Aparecerán aquí cuando alguien guarde su día.'}</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {recordNextPageToken && <button type="button" className="admin-load-more" onClick={() => loadRecords(true)} disabled={loadingRecords}>{loadingRecords ? 'Cargando…' : 'Cargar registros anteriores'}</button>}
+        </div>
+      )}
+
+      {section === 'admins' && (
+        <div className="admin-section">
+          {sectionHeading('ACCESO', 'Administradores', 'Cuentas que pueden entrar a este panel.') }
+          <div className="admin-account-list">
+            {adminAccounts.map((account) => (
+              <article className="admin-current-account" key={account.uid}>
+                <span className="admin-security-icon"><ShieldCheck size={23} /></span>
+                <div><strong>{account.name || 'Sin nombre'}</strong><p>{account.email || 'Correo no disponible'}</p><span>{account.uid === user?.uid ? 'Sesión actual · Administrador' : 'Administrador activo'}</span></div>
+                <span className="admin-provider-tag">{account.providers?.includes('google.com') ? 'Google' : account.providers?.includes('password') ? 'Correo' : 'Otro'}</span>
+              </article>
+            ))}
+            {!adminAccounts.length && <p className="admin-loading">No se encontró una cuenta administradora activa.</p>}
+          </div>
+          <p className="admin-footnote">El rol de administrador se configura de forma segura en Firebase. Aquí solo puedes consultar las cuentas autorizadas.</p>
+        </div>
+      )}
+
       {section === 'apis' && (
         <div className="admin-section">
-          <div className="admin-section-heading">
-            <div><span className="section-kicker">MONITOREO</span><h2>Estado de servicios externos</h2></div>
-            {apis?.checkedAt && <span className="admin-updated">Revisado {formatApiDate(apis.checkedAt)}</span>}
-          </div>
+          {sectionHeading('MONITOREO', 'Estado de servicios externos', 'Comprueba si los servicios de SyncLife responden.')}
+          {apis?.checkedAt && <span className="admin-updated">Revisado {formatApiDate(apis.checkedAt)}</span>}
           {!apis ? (apisLoading
             ? <p className="admin-loading" role="status">Comprobando proveedores…</p>
             : <button type="button" className="admin-load-more" onClick={refreshApis}>Volver a comprobar</button>) : (
@@ -348,7 +548,7 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
 
       {section === 'security' && (
         <div className="admin-section">
-          <div className="admin-section-heading"><div><span className="section-kicker">CONTROL DE ACCESO</span><h2>Seguridad del panel</h2></div></div>
+          {sectionHeading('CONTROL DE ACCESO', 'Seguridad del panel', 'Cómo se protegen el acceso y los datos administrativos.')}
           <div className="admin-security-card">
             <span className="admin-security-icon"><ShieldCheck size={23} /></span>
             <div><strong>{isAdmin ? 'Rol de administrador verificado' : 'Sin rol de administrador'}</strong><p>El token de Firebase incluye la custom claim <code>admin: true</code>. El backend verifica la firma y el rol en cada operación privilegiada.</p></div>
@@ -356,11 +556,32 @@ function AdminPanel({ user, isAdmin, onRefreshClaim }) {
           <div className="admin-security-grid">
             <article><strong>Firestore</strong><p>Reglas desplegadas: solo administradores pueden leer los contadores agregados; las escrituras pasan por el backend autenticado.</p></article>
             <article><strong>Datos personales</strong><p>No se exponen edad, peso, talla, calorías, finanzas, calendario, comidas ni rutinas individuales en el panel.</p></article>
-            <article><strong>Permisos admin</strong><p>Un administrador puede otorgar el rol a una cuenta activa. Las cuentas administradoras no se pueden bloquear ni eliminar desde esta interfaz.</p></article>
+            <article><strong>Cuenta administradora</strong><p>El permiso de administrador se configura de forma segura en el servidor. No se asigna desde la tabla de usuarios.</p></article>
           </div>
           <button type="button" className="admin-load-more" onClick={onRefreshClaim}>Volver a comprobar mi rol</button>
         </div>
       )}
+      {confirmAction && (
+        <div className="logout-dialog-backdrop">
+          <section className="logout-dialog admin-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="admin-confirm-title">
+            <span className="logout-dialog-icon">{confirmAction.type === 'delete' ? <Trash2 size={20} /> : <Lock size={20} />}</span>
+            <h2 id="admin-confirm-title">{confirmAction.type === 'delete' ? '¿Eliminar esta cuenta?' : confirmAction.disabled ? '¿Bloquear esta cuenta?' : '¿Desbloquear esta cuenta?'}</h2>
+            <p>{confirmAction.type === 'delete'
+              ? `Se eliminará la cuenta de ${confirmAction.account.email || confirmAction.account.name} de Firebase. Esta acción no se puede deshacer.`
+              : confirmAction.disabled
+                ? `${confirmAction.account.email || confirmAction.account.name} ya no podrá iniciar sesión en SyncLife.`
+                : `${confirmAction.account.email || confirmAction.account.name} podrá volver a iniciar sesión en SyncLife.`}</p>
+            <div className="logout-dialog-actions">
+              <button type="button" className="logout-cancel-button" onClick={() => setConfirmAction(null)} disabled={confirming}>Cancelar</button>
+              <button type="button" className="logout-confirm-button" onClick={performConfirmedAction} disabled={confirming}>
+                {confirming ? 'Procesando…' : confirmAction.type === 'delete' ? 'Sí, eliminar' : confirmAction.disabled ? 'Sí, bloquear' : 'Sí, desbloquear'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+        </div>
+      </div>
     </section>
   );
 }
@@ -692,6 +913,7 @@ function weatherSummary(weather, error, loading) {
 
 export default function App() {
   const [vista, setVista] = useState('inicio');
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -1007,13 +1229,13 @@ export default function App() {
     setTourStep(-1);
   };
 
-  const trackAdminActivity = async (type, recordId) => {
+  const trackAdminActivity = async (type, recordId, extra = {}) => {
     if (!auth?.currentUser || auth.currentUser.uid === 'local-demo-user') return;
     const token = await auth.currentUser.getIdToken();
     const response = await fetch(apiUrl('/api/admin/activity'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ type, recordId }),
+      body: JSON.stringify({ type, recordId, ...extra }),
     });
     if (!response.ok) {
       const responseText = await response.text();
@@ -1830,6 +2052,10 @@ export default function App() {
         exerciseProductivity: ejercicioCumplido ? Number(productividadEjercicio) : null,
       };
       setHistory((current) => [...current.filter((item) => item.date !== record.date), record].slice(-30));
+      trackAdminActivity('daily-record', record.date, { score: record.score }).catch((trackingError) => {
+        console.error('El registro quedó en este dispositivo, pero no se sincronizó con Firebase:', trackingError);
+        setNotification('El día se guardó en este dispositivo, pero no se pudo sincronizar con Firebase. Inténtalo nuevamente más tarde.');
+      });
       setVista('analisis');
     } catch (error) {
       console.error('Error al guardar el registro diario:', error);
@@ -2214,14 +2440,19 @@ export default function App() {
         </div>
       )}
       <div className={`screen-watermark watermark-${vista}`} aria-hidden="true"><ScreenBackdropIcon /></div>
-      <aside className="sidebar">
-        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setVista('inicio'); }}>
+      <aside className={`sidebar ${mobileNavigationOpen ? 'is-mobile-open' : ''}`}>
+        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setVista('inicio'); setMobileNavigationOpen(false); }}>
           <img className="brand-logo" src="/synclife-logo.png" alt="" />
           <span>SyncLife<span className="brand-light"> OS</span></span>
         </a>
+        <button type="button" className="sidebar-menu-toggle" aria-expanded={mobileNavigationOpen}
+          aria-controls="primary-navigation" onClick={() => setMobileNavigationOpen((open) => !open)}>
+          {mobileNavigationOpen ? <X size={18} /> : <Menu size={18} />}
+          <span>{mobileNavigationOpen ? 'Cerrar menú' : 'Menú'}</span>
+        </button>
 
         <div className="workspace-label">ESPACIO PERSONAL</div>
-        <nav className="sidebar-btns" aria-label="Navegación principal">
+        <nav id="primary-navigation" className="sidebar-btns" aria-label="Navegación principal" onClick={() => setMobileNavigationOpen(false)}>
           {navItems.map(({ id, label, icon: Icon }) => (
             id === 'bienestar' ? (
               <div className="sidebar-nav-group" key={id}>
@@ -2345,7 +2576,8 @@ export default function App() {
         )}
 
         {vista === 'admin' && isAdmin && (
-          <AdminPanel user={auth?.currentUser} isAdmin={isAdmin} onRefreshClaim={refreshAdminClaim} />
+          <AdminPanel user={auth?.currentUser} isAdmin={isAdmin} onRefreshClaim={refreshAdminClaim}
+            onExit={switchUser} onBack={() => setVista('inicio')} />
         )}
         {vista === 'inicio' && (
           <>

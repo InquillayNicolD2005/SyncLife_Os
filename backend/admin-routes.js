@@ -1,12 +1,13 @@
 const express = require('express');
 const { getAdminServices } = require('./firebase-admin');
 const { obtenerClima, getProviderUsage } = require('./synclife');
-const { deleteAccountRecord, syncAccount } = require('./postgres');
+const { deleteAccountRecord } = require('./postgres');
 
 const router = express.Router();
 const PAGE_SIZE = 100;
 const ADMIN_ACTIVITY_COLLECTION = 'adminActivity';
-const validActivityTypes = new Set(['meal', 'routine']);
+const ADMIN_RECORDS_COLLECTION = 'adminRecords';
+const validActivityTypes = new Set(['meal', 'routine', 'daily-record']);
 
 function sendAdminError(res, error, fallbackMessage) {
   console.error(fallbackMessage, error);
@@ -65,30 +66,67 @@ function toSafeUser(user) {
     createdAt: user.metadata.creationTime || null,
     disabled: Boolean(user.disabled),
     admin: user.customClaims?.admin === true,
+    providers: user.providerData.map((provider) => provider.providerId),
   };
 }
 
 router.post('/activity', authenticate, async (req, res) => {
-  const { type, recordId } = req.body || {};
+  const { type, recordId, score } = req.body || {};
   if (!validActivityTypes.has(type) || typeof recordId !== 'string'
     || !/^[A-Za-z0-9_-]{1,80}$/.test(recordId)) {
     return res.status(400).json({ error: 'El tipo o identificador de actividad no es válido.' });
+  }
+  if (type === 'daily-record'
+    && (!/^\d{4}-\d{2}-\d{2}$/.test(recordId) || !Number.isInteger(score) || score < 0 || score > 100)) {
+    return res.status(400).json({ error: 'El registro diario debe incluir una fecha y un puntaje válidos.' });
   }
 
   try {
     const { firestore, fieldValue } = getAdminServices();
     const summaryRef = firestore.collection(ADMIN_ACTIVITY_COLLECTION).doc(req.authUser.uid);
     const eventRef = summaryRef.collection('events').doc(`${type}_${recordId}`);
+    const dailyRecordRef = type === 'daily-record'
+      ? firestore.collection(ADMIN_RECORDS_COLLECTION).doc(`${req.authUser.uid}_${recordId}`)
+      : null;
     const result = await firestore.runTransaction(async (transaction) => {
       const event = await transaction.get(eventRef);
-      if (event.exists) return { recorded: false };
-      const countField = type === 'meal' ? 'meals' : 'routines';
-      transaction.create(eventRef, { type, createdAt: fieldValue.serverTimestamp() });
+      if (event.exists) {
+        if (dailyRecordRef) {
+          const recordData = {
+            score,
+            date: recordId,
+            uid: req.authUser.uid,
+            name: req.authUser.displayName || '',
+            email: req.authUser.email || '',
+            createdAt: fieldValue.serverTimestamp(),
+          };
+          transaction.set(eventRef, { score, createdAt: fieldValue.serverTimestamp() }, { merge: true });
+          transaction.set(dailyRecordRef, recordData, { merge: true });
+          return { recorded: false, updated: true };
+        }
+        return { recorded: false, updated: false };
+      }
+
+      const countField = type === 'meal' ? 'meals' : type === 'routine' ? 'routines' : 'records';
+      const eventData = { type, createdAt: fieldValue.serverTimestamp() };
+      if (type === 'daily-record') eventData.score = score;
+      transaction.create(eventRef, eventData);
       transaction.set(summaryRef, {
         [countField]: fieldValue.increment(1),
         updatedAt: fieldValue.serverTimestamp(),
       }, { merge: true });
-      return { recorded: true };
+
+      if (dailyRecordRef) {
+        transaction.create(dailyRecordRef, {
+          score,
+          date: recordId,
+          uid: req.authUser.uid,
+          name: req.authUser.displayName || '',
+          email: req.authUser.email || '',
+          createdAt: fieldValue.serverTimestamp(),
+        });
+      }
+      return { recorded: true, updated: false };
     });
     return res.status(200).json(result);
   } catch (error) {
@@ -101,13 +139,21 @@ router.use(authenticate, requireAdmin);
 router.get('/metrics', async (req, res) => {
   try {
     const { auth, firestore } = getAdminServices();
+    const now = new Date();
+    const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const previousWeekStart = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+    const utcDayStart = new Date(now);
+    utcDayStart.setUTCHours(0, 0, 0, 0);
+    const sevenDaysAgo = new Date(utcDayStart.getTime() - 6 * 24 * 60 * 60 * 1000);
+    const recordsRef = firestore.collection(ADMIN_RECORDS_COLLECTION);
     const [users, activitySnapshot] = await Promise.all([
       listAllUsers(auth),
       firestore.collection(ADMIN_ACTIVITY_COLLECTION).get(),
     ]);
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const utcDayStart = new Date();
-    utcDayStart.setUTCHours(0, 0, 0, 0);
+    const [totalRecordCount, recentRecordsSnapshot] = await Promise.all([
+      recordsRef.count().get(),
+      recordsRef.where('createdAt', '>=', previousWeekStart).get(),
+    ]);
     let meals = 0;
     let routines = 0;
 
@@ -117,11 +163,50 @@ router.get('/metrics', async (req, res) => {
       routines += Number.isSafeInteger(counts.routines) && counts.routines > 0 ? counts.routines : 0;
     });
 
+    const timestampOf = (record) => {
+      if (record.createdAt && typeof record.createdAt.toDate === 'function') {
+        return record.createdAt.toDate().getTime();
+      }
+      return Date.parse(record.createdAt || '');
+    };
+    const recentRecords = recentRecordsSnapshot.docs.map((document) => document.data());
+    const currentWeekRecords = recentRecords.filter((record) => timestampOf(record) >= weekStart.getTime());
+    const previousWeekRecords = recentRecords.filter((record) => {
+      const time = timestampOf(record);
+      return time >= previousWeekStart.getTime() && time < weekStart.getTime();
+    });
+    const averageScore = (records) => {
+      const scores = records.map((record) => record.score)
+        .filter((score) => Number.isInteger(score) && score >= 0 && score <= 100);
+      return scores.length
+        ? Math.round((scores.reduce((total, score) => total + score, 0) / scores.length) * 10) / 10
+        : null;
+    };
+    const todayDate = utcDayStart.toISOString().slice(0, 10);
+    const previousWeekDate = new Date(utcDayStart.getTime() - 7 * 24 * 60 * 60 * 1000)
+      .toISOString().slice(0, 10);
+    const dayCounts = new Map();
+    for (let offset = 0; offset < 7; offset += 1) {
+      const date = new Date(sevenDaysAgo.getTime() + offset * 24 * 60 * 60 * 1000)
+        .toISOString().slice(0, 10);
+      dayCounts.set(date, { date, count: 0 });
+    }
+    recentRecords.forEach((record) => {
+      const time = timestampOf(record);
+      if (Number.isFinite(time)) {
+        const date = new Date(time).toISOString().slice(0, 10);
+        const daily = dayCounts.get(date);
+        if (daily) daily.count += 1;
+      }
+    });
+
     return res.json({
       totalUsers: users.length,
-      newUsersThisWeek: users.filter((user) => {
-        const createdAt = Date.parse(user.metadata.creationTime);
-        return Number.isFinite(createdAt) && createdAt >= weekAgo;
+      admins: users.filter((user) => user.customClaims?.admin === true).map(toSafeUser),
+      usersThisWeek: users.filter((user) => Date.parse(user.metadata.creationTime || '') >= weekStart.getTime()).length,
+      usersPreviousWeek: users.filter((user) => {
+        const createdAt = Date.parse(user.metadata.creationTime || '');
+        return createdAt >= previousWeekStart.getTime() && createdAt < weekStart.getTime();
       }).length,
       activeToday: users.filter((user) => {
         const lastSignIn = Date.parse(user.metadata.lastSignInTime || '');
@@ -129,9 +214,49 @@ router.get('/metrics', async (req, res) => {
       }).length,
       totalMeals: meals,
       totalRoutines: routines,
+      totalRecords: totalRecordCount.data().count,
+      recordsThisWeek: currentWeekRecords.length,
+      recordsPreviousWeek: previousWeekRecords.length,
+      recordsToday: recentRecords.filter((record) => record.date === todayDate).length,
+      recordsSameDayPreviousWeek: recentRecords.filter((record) => record.date === previousWeekDate).length,
+      averageScore: averageScore(currentWeekRecords),
+      previousAverageScore: averageScore(previousWeekRecords),
+      recordsLast7Days: [...dayCounts.values()],
+      updatedAt: now.toISOString(),
     });
   } catch (error) {
     return sendAdminError(res, error, 'No se pudieron cargar las métricas administrativas.');
+  }
+});
+
+router.get('/records', async (req, res) => {
+  try {
+    const { firestore } = getAdminServices();
+    const pageSize = 100;
+    const recordsRef = firestore.collection(ADMIN_RECORDS_COLLECTION);
+    let query = recordsRef.orderBy('createdAt', 'desc').limit(pageSize);
+    if (typeof req.query.pageToken === 'string' && req.query.pageToken) {
+      const cursor = await recordsRef.doc(req.query.pageToken).get();
+      if (!cursor.exists) return res.status(400).json({ error: 'No se encontró el punto desde donde continuar.' });
+      query = recordsRef.orderBy('createdAt', 'desc').startAfter(cursor).limit(pageSize);
+    }
+    const page = await query.get();
+    return res.json({
+      records: page.docs.map((document) => {
+        const record = document.data();
+        return {
+          id: document.id,
+          name: record.name || 'Sin nombre',
+          email: record.email || '',
+          date: record.date || '',
+          score: Number.isInteger(record.score) ? record.score : null,
+          createdAt: record.createdAt?.toDate?.().toISOString() || null,
+        };
+      }),
+      nextPageToken: page.docs.length === pageSize ? page.docs[page.docs.length - 1].id : null,
+    });
+  } catch (error) {
+    return sendAdminError(res, error, 'No se pudieron cargar los registros diarios.');
   }
 });
 
@@ -145,41 +270,6 @@ router.get('/users', async (req, res) => {
     });
   } catch (error) {
     return sendAdminError(res, error, 'No se pudieron cargar las cuentas de usuario.');
-  }
-});
-
-router.patch('/users/:uid/admin', async (req, res) => {
-  const { uid } = req.params;
-  if (!uid || req.body?.admin !== true) {
-    return res.status(400).json({ error: 'La acción solo permite otorgar el rol de administrador.' });
-  }
-  if (uid === req.authUser.uid) {
-    return res.status(400).json({ error: 'No puedes modificar tu propio rol desde este panel.' });
-  }
-
-  try {
-    const { auth } = getAdminServices();
-    const target = await auth.getUser(uid);
-    if (target.disabled) {
-      return res.status(409).json({ error: 'Desbloquea la cuenta antes de otorgarle permisos de administrador.' });
-    }
-    if (target.customClaims?.admin !== true) {
-      await auth.setCustomUserClaims(uid, { ...target.customClaims, admin: true });
-    }
-    const promotedUser = await auth.getUser(uid);
-    let warning;
-    try {
-      await syncAccount(promotedUser, 'admin');
-    } catch (databaseError) {
-      console.error('El rol admin se asignó en Firebase, pero no se pudo sincronizar en PostgreSQL:', databaseError);
-      warning = 'El rol se asignó en Firebase, pero no se pudo sincronizar el registro PostgreSQL.';
-    }
-    return res.json({
-      user: toSafeUser(promotedUser),
-      ...(warning ? { warning } : {}),
-    });
-  } catch (error) {
-    return sendAdminError(res, error, 'No se pudieron asignar permisos de administrador.');
   }
 });
 
@@ -243,6 +333,19 @@ router.delete('/users/:uid', async (req, res) => {
     } catch (cleanupError) {
       console.error('La cuenta se eliminó, pero no se pudieron borrar sus contadores agregados:', cleanupError);
       cleanupWarnings.push('No se pudieron borrar sus contadores agregados.');
+    }
+    try {
+      const recordSnapshot = await firestore.collection(ADMIN_RECORDS_COLLECTION)
+        .where('uid', '==', uid)
+        .get();
+      for (let offset = 0; offset < recordSnapshot.docs.length; offset += 500) {
+        const batch = firestore.batch();
+        recordSnapshot.docs.slice(offset, offset + 500).forEach((document) => batch.delete(document.ref));
+        await batch.commit();
+      }
+    } catch (cleanupError) {
+      console.error('La cuenta se eliminó, pero no se pudieron borrar sus registros diarios:', cleanupError);
+      cleanupWarnings.push('No se pudieron borrar los registros diarios asociados.');
     }
     if (cleanupWarnings.length) return res.json({ deleted: true, warning: cleanupWarnings.join(' ') });
     return res.status(204).end();
