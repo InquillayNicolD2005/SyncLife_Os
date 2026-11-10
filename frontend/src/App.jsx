@@ -107,7 +107,8 @@ async function syncAccountWithBackend(user) {
     }
   }
   if (!response.ok) {
-    throw new Error(result.error || 'No se pudo guardar la cuenta en la base de datos.');
+    const message = result.error || 'No se pudo guardar la cuenta en la base de datos.';
+    throw new Error(result.stage ? `${message} (etapa: ${result.stage})` : message);
   }
   return result;
 }

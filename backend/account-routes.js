@@ -216,10 +216,25 @@ router.post('/sync', async (req, res) => {
     if (error.code === 'auth/user-disabled' || error.code === 'auth/user-not-found') {
       return res.status(403).json({ error: 'Esta cuenta ya no puede acceder.' });
     }
-    const message = syncStage.startsWith('firebase')
-      ? 'El backend no pudo verificar la sesión o asignar el rol en Firebase. Revisa FIREBASE_PROJECT_ID, FIREBASE_SERVICE_ACCOUNT_JSON y los permisos de Firebase Authentication en Render.'
-      : 'Firebase verificó la sesión, pero no se pudo guardar la cuenta en PostgreSQL. Revisa DATABASE_URL y la conexión de la base de Render.';
-    return res.status(error.statusCode || 503).json({ error: message, stage: syncStage });
+    const firebaseMessage = ({
+      'firebase/project-mismatch': 'FIREBASE_PROJECT_ID no coincide con el proyecto de FIREBASE_SERVICE_ACCOUNT_JSON. Ambos deben ser synclife-os-b2daf.',
+      'firebase/invalid-service-account-json': 'FIREBASE_SERVICE_ACCOUNT_JSON no es JSON válido. Vuelve a copiar el JSON completo de la cuenta de servicio en Render.',
+      'firebase/incomplete-service-account': 'FIREBASE_SERVICE_ACCOUNT_JSON debe incluir project_id, client_email y private_key.',
+      'firebase-authentication': 'No se pudo validar la sesión. En Render, verifica que FIREBASE_PROJECT_ID sea synclife-os-b2daf y que FIREBASE_SERVICE_ACCOUNT_JSON pertenezca a ese mismo proyecto.',
+      'firebase-admin-claim': 'No se pudo asignar el rol en Firebase. La cuenta de servicio de FIREBASE_SERVICE_ACCOUNT_JSON necesita permisos de administrador de Firebase Authentication.',
+      'firebase-admin-claim-refresh': 'No se pudieron actualizar los permisos de la sesión en Firebase. Revisa los permisos de administrador de Firebase Authentication de la cuenta de servicio.',
+    })[error.code] || ({
+      'firebase-authentication': 'No se pudo validar la sesión. En Render, verifica que FIREBASE_PROJECT_ID sea synclife-os-b2daf y que FIREBASE_SERVICE_ACCOUNT_JSON pertenezca a ese mismo proyecto.',
+      'firebase-admin-claim': 'No se pudo asignar el rol en Firebase. La cuenta de servicio de FIREBASE_SERVICE_ACCOUNT_JSON necesita permisos de administrador de Firebase Authentication.',
+      'firebase-admin-claim-refresh': 'No se pudieron actualizar los permisos de la sesión en Firebase. Revisa los permisos de administrador de Firebase Authentication de la cuenta de servicio.',
+    })[syncStage];
+    const message = firebaseMessage
+      || 'Firebase verificó la sesión, pero no se pudo guardar la cuenta en PostgreSQL. Revisa DATABASE_URL y la conexión de la base de Render.';
+    return res.status(error.statusCode || 503).json({
+      error: message,
+      stage: syncStage,
+      code: typeof error.code === 'string' ? error.code : undefined,
+    });
   }
 });
 
