@@ -305,6 +305,118 @@ async function analizarNutricion(comidaNombre = "Saludable") {
   }
 }
 
+function getNutritionPer100g(nutriments, key, unit) {
+  const rawValue = nutriments[`${key}_100g`];
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return {
+    value,
+    unit: nutriments[`${key}_unit`] || unit,
+  };
+}
+
+function convertNutrientUnit(nutrient, targetUnit) {
+  if (!nutrient) return null;
+  const unit = String(nutrient.unit || '').toLocaleLowerCase('en').replace('μ', 'µ');
+  const value = nutrient.value;
+  if (targetUnit === 'mg') {
+    if (unit === 'g') return value * 1000;
+    if (unit === 'µg' || unit === 'mcg' || unit === 'μg') return value / 1000;
+    return value;
+  }
+  if (targetUnit === 'µg') {
+    if (unit === 'g') return value * 1000000;
+    if (unit === 'mg') return value * 1000;
+    return value;
+  }
+  if (targetUnit === 'g') {
+    if (unit === 'mg') return value / 1000;
+    if (unit === 'µg' || unit === 'mcg' || unit === 'μg') return value / 1000000;
+    return value;
+  }
+  return value;
+}
+
+async function buscarProductosNutricion(comidaNombre) {
+  const fields = [
+    'code', 'product_name', 'brands', 'quantity', 'serving_size', 'nutriments',
+  ].join(',');
+  const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(comidaNombre)}&search_simple=1&action=process&json=1&page_size=8&fields=${encodeURIComponent(fields)}`;
+  const data = await fetchJson(url);
+  if (!Array.isArray(data.products)) {
+    throw new Error('Open Food Facts devolvió una respuesta que no se pudo leer.');
+  }
+
+  const micronutrientFields = [
+    ['calcium', 'Calcio', 'mg'],
+    ['iron', 'Hierro', 'mg'],
+    ['potassium', 'Potasio', 'mg'],
+    ['magnesium', 'Magnesio', 'mg'],
+    ['vitamin-c', 'Vitamina C', 'mg'],
+    ['vitamin-a', 'Vitamina A', 'µg'],
+  ];
+
+  return data.products
+    .filter((product) => typeof product.product_name === 'string' && product.product_name.trim())
+    .map((product) => {
+      const nutriments = product.nutriments || {};
+      let energyKcal = getNutritionPer100g(nutriments, 'energy-kcal', 'kcal');
+      if (!energyKcal) {
+        const energyKj = getNutritionPer100g(nutriments, 'energy', 'kJ');
+        if (energyKj) {
+          energyKcal = {
+            value: energyKj.unit.toLocaleLowerCase('en') === 'kcal'
+              ? energyKj.value
+              : energyKj.value / 4.184,
+            unit: 'kcal',
+          };
+        }
+      }
+      const sodium = getNutritionPer100g(nutriments, 'sodium', 'g');
+      const salt = getNutritionPer100g(nutriments, 'salt', 'g');
+      const sodiumMg = sodium
+        ? { value: convertNutrientUnit(sodium, 'mg'), unit: 'mg' }
+        : salt
+          ? {
+            value: convertNutrientUnit(salt, 'g') * 393.4,
+            unit: 'mg',
+          }
+          : null;
+      const addedSugar = convertNutrientUnit(
+        getNutritionPer100g(nutriments, 'added-sugars', 'g'),
+        'g',
+      );
+      const micronutrients = micronutrientFields.flatMap(([key, name, defaultUnit]) => {
+        const nutrient = getNutritionPer100g(nutriments, key, 'g');
+        return nutrient
+          ? [{ name, value: convertNutrientUnit(nutrient, defaultUnit), unit: defaultUnit }]
+          : [];
+      });
+
+      return {
+        code: typeof product.code === 'string' ? product.code : '',
+        name: product.product_name.trim().slice(0, 160),
+        brand: typeof product.brands === 'string' ? product.brands.trim().slice(0, 100) : '',
+        servingSize: typeof product.serving_size === 'string' ? product.serving_size.slice(0, 80) : '',
+        quantity: typeof product.quantity === 'string' ? product.quantity.slice(0, 80) : '',
+        per100g: {
+          energyKcal: energyKcal?.value ?? null,
+          proteinG: convertNutrientUnit(getNutritionPer100g(nutriments, 'proteins', 'g'), 'g'),
+          carbohydratesG: convertNutrientUnit(getNutritionPer100g(nutriments, 'carbohydrates', 'g'), 'g'),
+          fatG: convertNutrientUnit(getNutritionPer100g(nutriments, 'fat', 'g'), 'g'),
+          fiberG: convertNutrientUnit(getNutritionPer100g(nutriments, 'fiber', 'g'), 'g'),
+          sodiumMg: sodiumMg?.value ?? null,
+          addedSugarG: addedSugar,
+          micronutrients,
+        },
+      };
+    })
+    .filter((product) => Object.entries(product.per100g)
+      .some(([key, value]) => key === 'micronutrients' ? value.length > 0 : value !== null))
+    .slice(0, 8);
+}
+
 function generarDiagnostico(datos) {
   const { horasEnfoque, animoValor, esAhorro, ejercitado } = datos;
   let puntaje = Math.min(40, horasEnfoque * 10) + Math.min(20, animoValor * 2) + (esAhorro ? 20 : 10) + (ejercitado ? 20 : 5);
@@ -346,6 +458,7 @@ module.exports = {
   obtenerClima,
   convertirMoneda,
   analizarNutricion,
+  buscarProductosNutricion,
   generarDiagnostico,
   guardarRegistroDB,
   getProviderUsage,

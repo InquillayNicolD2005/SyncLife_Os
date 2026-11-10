@@ -414,6 +414,20 @@ const mealCategoryLabels = {
   Cena: 'CENA',
   Break: 'BREAK',
 };
+
+function getPortionWeightInGrams(portion) {
+  const match = String(portion || '').match(/(\d+(?:[.,]\d+)?)\s*(kg|kilogramos?|g|gr|gramos?)\b/i);
+  if (!match) return null;
+  const amount = Number(match[1].replace(',', '.'));
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return Math.round(amount * (match[2].toLocaleLowerCase('es').startsWith('k') ? 1000 : 1));
+}
+
+function scaleNutritionValue(value, factor, digits = 1) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '';
+  const scale = 10 ** digits;
+  return String(Math.round(value * factor * scale) / scale);
+}
 const initialWorkouts = [
   { day: 1, name: 'Fuerza: cuerpo completo', duration: 35 },
   { day: 2, name: 'Movilidad y caminata', duration: 25 },
@@ -751,8 +765,10 @@ export default function App() {
   const [mealFat, setMealFat] = useState('');
   const [mealPortion, setMealPortion] = useState('');
   const [mealNutritionEstimate, setMealNutritionEstimate] = useState(null);
+  const [mealNutritionMatches, setMealNutritionMatches] = useState([]);
+  const [selectedNutritionMatchIndex, setSelectedNutritionMatchIndex] = useState(-1);
   const [mealNutritionError, setMealNutritionError] = useState('');
-  const [isEstimatingMealNutrition, setIsEstimatingMealNutrition] = useState(false);
+  const [isSearchingMealNutrition, setIsSearchingMealNutrition] = useState(false);
 
   const today = new Date();
   const [eventoNombre, setEventoNombre] = useState('');
@@ -1486,6 +1502,8 @@ export default function App() {
 
   const clearMealNutritionEstimate = () => {
     setMealNutritionEstimate(null);
+    setMealNutritionMatches([]);
+    setSelectedNutritionMatchIndex(-1);
     setMealNutritionError('');
     setMealEnergy('');
     setMealProtein('');
@@ -1497,48 +1515,72 @@ export default function App() {
     setMealMicronutrients('');
   };
 
-  const estimateMealNutrition = async () => {
-    if (!mealName.trim() || !mealPortion.trim()) {
-      setMealNutritionError('Escribe el alimento y la porción antes de pedir la estimación.');
+  const selectNutritionMatch = (product, index) => {
+    const portionGrams = getPortionWeightInGrams(mealPortion);
+    const factor = portionGrams ? portionGrams / 100 : 1;
+    const nutrition = product.per100g;
+    const micronutrients = nutrition.micronutrients
+      .map((item) => `${item.name.toLocaleLowerCase('es')} ${scaleNutritionValue(item.value, factor, 2)} ${item.unit}`)
+      .join(', ');
+    setSelectedNutritionMatchIndex(index);
+    setMealEnergy(scaleNutritionValue(nutrition.energyKcal, factor, 0));
+    setMealProtein(scaleNutritionValue(nutrition.proteinG, factor));
+    setMealCarbohydrates(scaleNutritionValue(nutrition.carbohydratesG, factor));
+    setMealFat(scaleNutritionValue(nutrition.fatG, factor));
+    setMealFiber(scaleNutritionValue(nutrition.fiberG, factor));
+    setMealSodium(scaleNutritionValue(nutrition.sodiumMg, factor, 0));
+    setMealAddedSugar(scaleNutritionValue(nutrition.addedSugarG, factor));
+    setMealMicronutrients(micronutrients);
+    setMealNutritionEstimate({
+      source: 'Open Food Facts',
+      retrievedAt: product.retrievedAt || null,
+      productName: product.name,
+      brand: product.brand,
+      basis: portionGrams
+        ? `Valores por 100 g ajustados a ${portionGrams} g.`
+        : 'Valores de la API por 100 g; indica el peso en gramos para calcular tu porción.',
+    });
+  };
+
+  const searchMealNutrition = async () => {
+    if (!mealName.trim()) {
+      setMealNutritionError('Escribe el nombre del alimento antes de buscar sus nutrientes.');
       return;
     }
 
-    setIsEstimatingMealNutrition(true);
+    setIsSearchingMealNutrition(true);
     setMealNutritionError('');
+    setMealNutritionEstimate(null);
+    setMealNutritionMatches([]);
+    setSelectedNutritionMatchIndex(-1);
     try {
-      const response = await fetch(apiUrl('/api/synclife/ai/nutrition-estimate'), {
+      const response = await fetch(apiUrl('/api/synclife/nutrition/search'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ food: mealName.trim(), portion: mealPortion.trim(), mealType }),
+        body: JSON.stringify({ food: mealName.trim() }),
       });
       const responseText = await response.text();
       let result;
       try {
         result = JSON.parse(responseText);
       } catch {
-        throw new Error('El backend no devolvió una respuesta válida. Comprueba que esté iniciado e inténtalo otra vez.');
+        throw new Error('El backend no devolvió una respuesta válida. Comprueba la conexión e inténtalo otra vez.');
       }
-      if (!response.ok) throw new Error(result.error || 'No se pudo estimar la nutrición.');
+      if (!response.ok) throw new Error(result.error || 'No se pudieron consultar los nutrientes.');
 
-      setMealFiber(result.fiberG == null ? '' : String(result.fiberG));
-      setMealSodium(result.sodiumMg == null ? '' : String(result.sodiumMg));
-      setMealAddedSugar(result.addedSugarG == null ? '' : String(result.addedSugarG));
-      setMealMicronutrients(result.micronutrients || '');
-      setMealEnergy(result.energyKcal == null ? '' : String(result.energyKcal));
-      setMealProtein(result.proteinG == null ? '' : String(result.proteinG));
-      setMealCarbohydrates(result.carbohydratesG == null ? '' : String(result.carbohydratesG));
-      setMealFat(result.fatG == null ? '' : String(result.fatG));
-      setMealNutritionEstimate({
-        source: result.source,
-        estimatedAt: result.estimatedAt,
-        basis: result.basis,
-        recommendation: result.recommendation,
-      });
+      const matches = result.matches.map((product, index) => ({
+        ...product,
+        key: `${product.code || product.name}-${index}`,
+        retrievedAt: result.retrievedAt,
+      }));
+      setMealNutritionMatches(matches);
+      if (!matches.length) throw new Error('Open Food Facts no devolvió alimentos con datos nutricionales.');
+      selectNutritionMatch(matches[0], 0);
     } catch (error) {
-      console.error('No se pudo estimar la nutrición de la comida:', error);
-      setMealNutritionError(error.message || 'No se pudo conectar con el servicio de IA.');
+      console.error('No se pudieron consultar los nutrientes de Open Food Facts:', error);
+      setMealNutritionError(error.message || 'No se pudo conectar con la API nutricional.');
     } finally {
-      setIsEstimatingMealNutrition(false);
+      setIsSearchingMealNutrition(false);
     }
   };
 
@@ -1574,9 +1616,10 @@ export default function App() {
         micronutrients: mealMicronutrients.trim(),
         portion: mealPortion.trim(),
         source: mealNutritionEstimate?.source || 'Registro manual',
-        estimatedAt: mealNutritionEstimate?.estimatedAt || null,
+        productName: mealNutritionEstimate?.productName || '',
+        brand: mealNutritionEstimate?.brand || '',
+        estimatedAt: mealNutritionEstimate?.retrievedAt || null,
         basis: mealNutritionEstimate?.basis || '',
-        recommendation: mealNutritionEstimate?.recommendation || '',
       },
     }].sort((first, second) => first.date.localeCompare(second.date)));
     setNotification(`${mealTypeLabels[mealType] || mealType} añadido a tu plan para el ${dateLabel(new Date(`${mealDate}T12:00:00`), { day: 'numeric', month: 'long' })}.`);
@@ -1596,6 +1639,8 @@ export default function App() {
     setMealMicronutrients('');
     setMealPortion('');
     setMealNutritionEstimate(null);
+    setMealNutritionMatches([]);
+    setSelectedNutritionMatchIndex(-1);
     setMealNutritionError('');
   };
 
@@ -2731,30 +2776,53 @@ export default function App() {
               </div>
               <form className="meal-entry-form" onSubmit={addMealPlan}>
                 <div className="field"><label htmlFor="meal-date">Fecha</label><input id="meal-date" type="date" value={mealDate} onChange={(event) => setMealDate(event.target.value)} required /></div>
-                <div className="field"><label htmlFor="meal-type">Tipo de comida</label><select id="meal-type" value={mealType} disabled={isEstimatingMealNutrition} onChange={(event) => { if (event.target.value !== mealType) clearMealNutritionEstimate(); setMealType(event.target.value); }}>{mealTypes.map((type) => <option key={type} value={type}>{mealTypeLabels[type]}</option>)}</select></div>
-                <div className="field"><label htmlFor="meal-name">Alimento o plato</label><input id="meal-name" value={mealName} disabled={isEstimatingMealNutrition} onChange={(event) => { if (event.target.value !== mealName) clearMealNutritionEstimate(); setMealName(event.target.value); }} placeholder="Ej. arroz, pollo y ensalada" required /></div>
-                <div className="field"><label htmlFor="meal-portion">Porción o cantidad</label><input id="meal-portion" value={mealPortion} disabled={isEstimatingMealNutrition} onChange={(event) => { if (event.target.value !== mealPortion) clearMealNutritionEstimate(); setMealPortion(event.target.value); }} placeholder="Ej. 1 plato (350 g)" /></div>
+                <div className="field"><label htmlFor="meal-type">Tipo de comida</label><select id="meal-type" value={mealType} disabled={isSearchingMealNutrition} onChange={(event) => { if (event.target.value !== mealType) clearMealNutritionEstimate(); setMealType(event.target.value); }}>{mealTypes.map((type) => <option key={type} value={type}>{mealTypeLabels[type]}</option>)}</select></div>
+                <div className="field"><label htmlFor="meal-name">Alimento o plato</label><input id="meal-name" value={mealName} disabled={isSearchingMealNutrition} onChange={(event) => { if (event.target.value !== mealName) clearMealNutritionEstimate(); setMealName(event.target.value); }} placeholder="Ej. arroz, pollo y ensalada" required /></div>
+                <div className="field"><label htmlFor="meal-portion">Porción o cantidad (opcional)</label><input id="meal-portion" value={mealPortion} disabled={isSearchingMealNutrition} onChange={(event) => { if (event.target.value !== mealPortion) clearMealNutritionEstimate(); setMealPortion(event.target.value); }} placeholder="Ej. 350 g para calcular la porción" /></div>
                 <div className="field"><label htmlFor="meal-cost">Costo estimado del plato (PEN)</label><input id="meal-cost" type="number" min="0" step="0.1" value={mealCost} onChange={(event) => setMealCost(event.target.value)} placeholder="0.00" required /></div>
                 <details className="meal-nutrition-details" open>
-                  <summary><Activity size={15} /> Estimar nutrientes o ingresarlos manualmente</summary>
-                  <p>La estimación usa la porción indicada y referencias nutricionales aproximadas. Revisa los datos antes de guardar; pueden variar según el alimento y su preparación.</p>
-                  <button className="estimate-nutrients-button" type="button" onClick={estimateMealNutrition} disabled={isEstimatingMealNutrition || !mealName.trim() || !mealPortion.trim()}>
-                    <Sparkles size={15} /> {isEstimatingMealNutrition ? 'Estimando…' : 'Estimar'}
+                  <summary><Activity size={15} /> Consultar nutrientes o ingresarlos manualmente</summary>
+                  <p>Los datos provienen de Open Food Facts. Si no indicas un peso en gramos o kilogramos, se muestran por 100 g; los productos pueden no coincidir exactamente con un plato preparado.</p>
+                  <button className="estimate-nutrients-button" type="button" onClick={searchMealNutrition} disabled={isSearchingMealNutrition || !mealName.trim()}>
+                    <Activity size={15} /> {isSearchingMealNutrition ? 'Buscando…' : 'Consultar API nutricional'}
                   </button>
                   {mealNutritionError && <p className="nutrition-estimate-message is-error" role="alert">{mealNutritionError}</p>}
-                  {mealNutritionEstimate && <div className="nutrition-estimate-message" role="status">Estimación de {mealNutritionEstimate.source} lista. Revísala y corrige los campos antes de guardar. Los nutrientes sin datos quedan vacíos.{mealNutritionEstimate.basis ? ` Supuesto: ${mealNutritionEstimate.basis}` : ''}<br /><strong>Recomendación:</strong> {mealNutritionEstimate.recommendation}</div>}
+                  {mealNutritionMatches.length > 0 && (
+                    <div className="field">
+                      <label htmlFor="nutrition-product-match">Producto encontrado</label>
+                      <select id="nutrition-product-match" value={selectedNutritionMatchIndex} onChange={(event) => {
+                        const index = Number(event.target.value);
+                        if (Number.isInteger(index) && mealNutritionMatches[index]) {
+                          selectNutritionMatch(mealNutritionMatches[index], index);
+                        }
+                      }}>
+                        {mealNutritionMatches.map((product, index) => (
+                          <option key={product.key} value={index}>{product.name}{product.brand ? ` · ${product.brand}` : ''}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {mealNutritionEstimate && (
+                    <div className="nutrition-estimate-message" role="status">
+                      Datos de {mealNutritionEstimate.source}: <strong>{mealNutritionEstimate.productName}</strong>{mealNutritionEstimate.brand ? ` (${mealNutritionEstimate.brand})` : ''}. Los nutrientes que la fuente no publica quedan vacíos. {mealNutritionEstimate.basis}
+                    </div>
+                  )}
                   <div className="nutrition-facts">
-                    <h4>Información nutricional estimada · {mealPortion.trim() || 'por porción'}</h4>
+                    <h4>Información nutricional · {mealNutritionEstimate
+                      ? (getPortionWeightInGrams(mealPortion)
+                        ? `${getPortionWeightInGrams(mealPortion)} g`
+                        : 'por 100 g')
+                      : (mealPortion.trim() || 'por porción')}</h4>
                     <table className="nutrition-facts-table">
-                      <thead><tr><th>Nutriente</th><th>Por porción</th></tr></thead>
+                      <thead><tr><th>Nutriente</th><th>Cantidad</th></tr></thead>
                       <tbody>
-                        <tr><th scope="row">Energía</th><td>{mealEnergy ? `${mealEnergy} kcal` : '—'}</td></tr>
-                        <tr><th scope="row">Proteínas</th><td>{mealProtein ? `${mealProtein} g` : '—'}</td></tr>
-                        <tr><th scope="row">Carbohidratos</th><td>{mealCarbohydrates ? `${mealCarbohydrates} g` : '—'}</td></tr>
-                        <tr><th scope="row">Grasas</th><td>{mealFat ? `${mealFat} g` : '—'}</td></tr>
-                        <tr><th scope="row">Fibra</th><td>{mealFiber ? `${mealFiber} g` : '—'}</td></tr>
-                        <tr><th scope="row">Sodio</th><td>{mealSodium ? `${mealSodium} mg` : '—'}</td></tr>
-                        <tr><th scope="row">Azúcares añadidos</th><td>{mealAddedSugar ? `${mealAddedSugar} g` : '—'}</td></tr>
+                        <tr><th scope="row">Energía</th><td>{mealEnergy !== '' ? `${mealEnergy} kcal` : '—'}</td></tr>
+                        <tr><th scope="row">Proteínas</th><td>{mealProtein !== '' ? `${mealProtein} g` : '—'}</td></tr>
+                        <tr><th scope="row">Carbohidratos</th><td>{mealCarbohydrates !== '' ? `${mealCarbohydrates} g` : '—'}</td></tr>
+                        <tr><th scope="row">Grasas</th><td>{mealFat !== '' ? `${mealFat} g` : '—'}</td></tr>
+                        <tr><th scope="row">Fibra</th><td>{mealFiber !== '' ? `${mealFiber} g` : '—'}</td></tr>
+                        <tr><th scope="row">Sodio</th><td>{mealSodium !== '' ? `${mealSodium} mg` : '—'}</td></tr>
+                        <tr><th scope="row">Azúcares añadidos</th><td>{mealAddedSugar !== '' ? `${mealAddedSugar} g` : '—'}</td></tr>
                         <tr><th scope="row">Vitaminas y minerales</th><td>{mealMicronutrients || '—'}</td></tr>
                       </tbody>
                     </table>
