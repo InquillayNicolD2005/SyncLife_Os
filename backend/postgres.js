@@ -78,6 +78,8 @@ async function syncAccount(user) {
   const database = await getPool();
   const registeredAt = user.metadata?.creationTime || new Date().toISOString();
   const lastLoginAt = user.metadata?.lastSignInTime || registeredAt;
+  const isRootAdmin = user.email?.trim().toLowerCase() === ROOT_ADMIN_EMAIL;
+  const isFirebaseAdmin = isRootAdmin || user.customClaims?.admin === true;
   const providers = Array.isArray(user.providerData)
     ? user.providerData.map((provider) => provider.providerId).filter(Boolean)
     : [];
@@ -87,29 +89,36 @@ async function syncAccount(user) {
       admin_granted_by
     )
     VALUES (
-      $1, $2, $3, CASE WHEN LOWER($2) = $4 THEN 'admin' ELSE 'user' END,
-      $5::jsonb, $6, $7::timestamptz, $8::timestamptz,
-      CASE WHEN LOWER($2) = $4 THEN 'system-root' ELSE NULL END
+      $1, $2, $3, CASE WHEN $8 THEN 'admin' ELSE 'user' END,
+      $4::jsonb, $5, $6::timestamptz, $7::timestamptz,
+      CASE WHEN $9 THEN 'system-root' WHEN $8 THEN 'firebase-claim' ELSE NULL END
     )
     ON CONFLICT (firebase_uid) DO UPDATE SET
       email = EXCLUDED.email,
       display_name = EXCLUDED.display_name,
-      role = CASE
-        WHEN LOWER(EXCLUDED.email) = $4 THEN 'admin'
-        WHEN synclife_accounts.admin_granted_by IS NOT NULL THEN synclife_accounts.role
-        ELSE 'user'
-      END,
+      role = EXCLUDED.role,
       admin_granted_by = CASE
-        WHEN LOWER(EXCLUDED.email) = $4 THEN 'system-root'
-        ELSE synclife_accounts.admin_granted_by
+        WHEN $9 THEN 'system-root'
+        WHEN $8 THEN COALESCE(synclife_accounts.admin_granted_by, 'firebase-claim')
+        ELSE NULL
       END,
-      providers = $5,
-      disabled = $6,
-      registered_at = LEAST(synclife_accounts.registered_at, $7::timestamptz),
-      last_login_at = GREATEST(synclife_accounts.last_login_at, $8::timestamptz),
+      providers = $4,
+      disabled = $5,
+      registered_at = LEAST(synclife_accounts.registered_at, $6::timestamptz),
+      last_login_at = GREATEST(synclife_accounts.last_login_at, $7::timestamptz),
       updated_at = NOW()
     RETURNING role, admin_granted_by
-  `, [user.uid, user.email || '', user.displayName || '', ROOT_ADMIN_EMAIL, JSON.stringify(providers), Boolean(user.disabled), registeredAt, lastLoginAt]);
+  `, [
+    user.uid,
+    user.email || '',
+    user.displayName || '',
+    JSON.stringify(providers),
+    Boolean(user.disabled),
+    registeredAt,
+    lastLoginAt,
+    isFirebaseAdmin,
+    isRootAdmin,
+  ]);
   return {
     admin: result.rows[0]?.role === 'admin',
     superAdmin: result.rows[0]?.admin_granted_by === 'system-root',
@@ -122,8 +131,14 @@ async function syncAccounts(users) {
     uid: user.uid,
     email: user.email || '',
     name: user.displayName || '',
-    role: user.email?.trim().toLowerCase() === ROOT_ADMIN_EMAIL ? 'admin' : 'user',
-    adminGrantedBy: user.email?.trim().toLowerCase() === ROOT_ADMIN_EMAIL ? 'system-root' : null,
+    role: user.email?.trim().toLowerCase() === ROOT_ADMIN_EMAIL || user.customClaims?.admin === true
+      ? 'admin'
+      : 'user',
+    adminGrantedBy: user.email?.trim().toLowerCase() === ROOT_ADMIN_EMAIL
+      ? 'system-root'
+      : user.customClaims?.admin === true
+        ? 'firebase-claim'
+        : null,
     providers: Array.isArray(user.providerData)
       ? user.providerData.map((provider) => provider.providerId).filter(Boolean)
       : [],
@@ -139,24 +154,23 @@ async function syncAccounts(users) {
       admin_granted_by
     )
     SELECT firebase_uid, email, display_name,
-      CASE WHEN LOWER(email) = $2 THEN 'admin' ELSE 'user' END,
-      providers, disabled, registered_at, last_login_at,
-      CASE WHEN LOWER(email) = $2 THEN 'system-root' ELSE NULL END
+      role, providers, disabled, registered_at, last_login_at, admin_granted_by
     FROM jsonb_to_recordset($1::jsonb) AS accounts(
       firebase_uid text, email text, display_name text, role text, providers jsonb,
-      disabled boolean, registered_at timestamptz, last_login_at timestamptz
+      disabled boolean, registered_at timestamptz, last_login_at timestamptz,
+      admin_granted_by text
     )
     ON CONFLICT (firebase_uid) DO UPDATE SET
       email = EXCLUDED.email,
       display_name = EXCLUDED.display_name,
-      role = CASE
-        WHEN LOWER(EXCLUDED.email) = $2 THEN 'admin'
-        WHEN synclife_accounts.admin_granted_by IS NOT NULL THEN synclife_accounts.role
-        ELSE 'user'
-      END,
+      role = EXCLUDED.role,
       admin_granted_by = CASE
-        WHEN LOWER(EXCLUDED.email) = $2 THEN 'system-root'
-        ELSE synclife_accounts.admin_granted_by
+        WHEN EXCLUDED.admin_granted_by = 'system-root' THEN 'system-root'
+        WHEN EXCLUDED.role = 'admin' THEN COALESCE(
+          synclife_accounts.admin_granted_by,
+          EXCLUDED.admin_granted_by
+        )
+        ELSE NULL
       END,
       providers = EXCLUDED.providers,
       disabled = EXCLUDED.disabled,
@@ -172,7 +186,8 @@ async function syncAccounts(users) {
     disabled: row.disabled,
     registered_at: row.registeredAt,
     last_login_at: row.lastLoginAt,
-  }))), ROOT_ADMIN_EMAIL]);
+    admin_granted_by: row.adminGrantedBy,
+  })))]);
 }
 
 async function setAccountRole(uid, role, grantedBy = null) {
