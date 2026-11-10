@@ -18,6 +18,24 @@ La autenticación usa Firebase Authentication. La configuración web del proyect
 
 La autenticación es real, pero los datos de SyncLife actualmente se guardan en el navegador, separados por UID de Firebase; no se sincronizan entre dispositivos ni se almacenan en Firebase.
 
+## Panel administrativo
+
+El panel aparece en la navegación solo cuando el usuario tiene la custom claim `admin: true`. Las rutas de administración vuelven a validar en el backend la sesión revocada/no revocada y el claim; ocultar la opción en el cliente no es una medida de seguridad. Las cuentas administradoras están protegidas contra bloqueo o eliminación desde el panel.
+
+1. Habilita **Firestore Database** en el mismo proyecto Firebase de Authentication. Desde la raíz del repositorio, publica las reglas de `firestore.rules` con Firebase CLI (`firebase deploy --only firestore:rules --project synclife-os-b2daf`) o pégalas en **Firestore Database → Rules** y pulsa **Publicar**. Las reglas permiten a administradores leer los contadores agregados; las escrituras solo se aceptan desde el backend con Admin SDK. El resto de documentos no es accesible desde clientes.
+2. Proporciona al backend una cuenta de servicio privada del mismo proyecto. En Render define `FIREBASE_PROJECT_ID=synclife-os-b2daf` y `FIREBASE_SERVICE_ACCOUNT_JSON` con el JSON de la cuenta de servicio. Asigna solo permisos de administración de Firebase Authentication y acceso a Firestore que requiera el servicio. Para desarrollo local puedes usar `GOOGLE_APPLICATION_CREDENTIALS` con la ruta absoluta al archivo de credenciales. No guardes el JSON en Git ni en el frontend.
+3. En terminal, busca el UID de tu cuenta en **Firebase Console → Authentication → Users** y ejecuta:
+
+   ```powershell
+   npm ci --prefix backend
+   npm --prefix backend run set-admin -- UID_DE_TU_CUENTA
+   ```
+
+   El comando requiere las mismas credenciales Admin SDK. Cierra sesión y vuelve a entrar (o usa «Volver a comprobar mi rol») para refrescar el token. Vuelve a desplegar el backend después de configurarle las variables.
+4. Inicia la app con `npm run dev`. El panel contiene Resumen, Usuarios, Estado de APIs y Seguridad. Bloquear deshabilita la cuenta en Firebase y revoca sus tokens; eliminar borra la cuenta de Firebase Auth y sus contadores agregados. Los datos personales de la app están en `localStorage` del dispositivo y no pueden borrarse remotamente desde el panel.
+
+Los contadores de comidas y rutinas empiezan desde que se habilita esta versión; los registros históricos locales no se pueden reconstruir. Solo se envían el tipo de actividad y un ID opaco para deduplicarla, nunca el contenido de comidas, peso, edad, talla, finanzas o calendario. «Activos hoy» se estima con el último inicio de sesión de Firebase (día UTC). La comprobación de YouTube usa oEmbed; la app usa iframes y no consume cuota de YouTube Data API. El consumo del clima cuenta solicitudes a proveedores desde que arrancó el proceso del backend y se reinicia al desplegar.
+
 ## Despliegue: backend en Render y frontend en Vercel
 
 El servicio existente `SyncLife_Os` en Render debe usar la raíz `backend`, el comando de build `npm ci && npm rebuild sqlite3 --build-from-source` y el comando de inicio `npm start`. La recompilación evita reutilizar un binario de `sqlite3` que requiere una versión de glibc distinta. Render define `PORT` automáticamente; `3002` es solo el valor predeterminado local. Comprueba disponibilidad en `/api/health`.

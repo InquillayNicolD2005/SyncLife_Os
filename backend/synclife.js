@@ -9,6 +9,7 @@ const dbPath = process.env.SQLITE_DB_PATH
 if (process.env.SQLITE_DB_PATH) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new sqlite3.Database(dbPath);
 const serviceCache = new Map();
+const providerUsage = { openMeteo: 0, wttr: 0 };
 const EXTERNAL_API_TIMEOUT_MS = 7000;
 const WEATHER_CACHE_TTL_MS = 10 * 60 * 1000;
 const WEATHER_API_TIMEOUT_MS = 5000;
@@ -78,6 +79,12 @@ db.serialize(() => {
 });
 
 async function fetchJson(url, timeoutMs = EXTERNAL_API_TIMEOUT_MS) {
+  const hostname = new URL(url).hostname;
+  if (hostname === 'geocoding-api.open-meteo.com' || hostname === 'api.open-meteo.com') {
+    providerUsage.openMeteo += 1;
+  } else if (hostname === 'wttr.in') {
+    providerUsage.wttr += 1;
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -90,6 +97,13 @@ async function fetchJson(url, timeoutMs = EXTERNAL_API_TIMEOUT_MS) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function getProviderUsage() {
+  return {
+    openMeteo: providerUsage.openMeteo,
+    wttr: providerUsage.wttr,
+  };
 }
 
 async function consultarOpenMeteo(ciudad) {
@@ -327,4 +341,12 @@ function guardarRegistroDB(data) {
   });
 }
 
-module.exports = { db, obtenerClima, convertirMoneda, analizarNutricion, generarDiagnostico, guardarRegistroDB };
+module.exports = {
+  db,
+  obtenerClima,
+  convertirMoneda,
+  analizarNutricion,
+  generarDiagnostico,
+  guardarRegistroDB,
+  getProviderUsage,
+};

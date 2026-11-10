@@ -4,10 +4,14 @@ import {
   Check, CheckCircle2, ChevronLeft, ChevronRight, Circle, CircleDollarSign,
   ClipboardList, CloudSun, Download, Dumbbell, Flame, HelpCircle, Home, LayoutDashboard, LogOut, Pause, Play,
   ListTodo, MapPin, Pencil, Plus, Salad, Save, Sparkles, Star, Target, Trash2, Utensils, Wallet,
-  Shirt, Pill, ShoppingBag, Coffee, RefreshCw,
+  Shirt, Pill, ShoppingBag, Coffee, RefreshCw, Search, ShieldCheck, Users, Lock, Unlock,
 } from 'lucide-react';
 import jsPDF from 'jspdf';
-import { getRedirectResult, GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signInWithRedirect, signOut } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword, getRedirectResult, GoogleAuthProvider, onAuthStateChanged,
+  sendPasswordResetEmail, signInWithEmailAndPassword, signInWithPopup, signInWithRedirect,
+  signOut, updateProfile,
+} from 'firebase/auth';
 import { auth, firebaseConfigured } from './firebase';
 import './App.css';
 
@@ -35,6 +39,288 @@ const apiUrl = (path) => {
   }
   return `${API_BASE_URL}${path}`;
 };
+
+async function adminRequest(user, path, options = {}) {
+  if (!user) throw new Error('No hay una sesión válida. Inicia sesión de nuevo.');
+  const token = await user.getIdToken();
+  const response = await fetch(apiUrl(path), {
+    ...options,
+    headers: {
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...options.headers,
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (response.status === 204) return null;
+  const responseText = await response.text();
+  let result = {};
+  if (responseText) {
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      throw new Error('El backend devolvió una respuesta que no se pudo leer.');
+    }
+  }
+  if (!response.ok) throw new Error(result.error || 'No se pudo completar la solicitud administrativa.');
+  return result;
+}
+
+function AdminPanel({ user, isAdmin, onRefreshClaim }) {
+  const [section, setSection] = useState('summary');
+  const [metrics, setMetrics] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [nextPageToken, setNextPageToken] = useState(null);
+  const [search, setSearch] = useState('');
+  const [apis, setApis] = useState(null);
+  const [apisLoading, setApisLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [busyUid, setBusyUid] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const refreshOverview = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [nextMetrics, firstPage] = await Promise.all([
+        adminRequest(user, '/api/admin/metrics'),
+        adminRequest(user, '/api/admin/users'),
+      ]);
+      setMetrics(nextMetrics);
+      setUsers(firstPage.users);
+      setNextPageToken(firstPage.nextPageToken);
+      return true;
+    } catch (requestError) {
+      console.error('No se pudo cargar el panel administrativo:', requestError);
+      setError(requestError.message);
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshOverview();
+  }, [user]);
+
+  const refreshApis = async () => {
+    setApisLoading(true);
+    setError('');
+    try {
+      setApis(await adminRequest(user, '/api/admin/apis'));
+    } catch (requestError) {
+      console.error('No se pudo consultar el estado de las APIs:', requestError);
+      setError(requestError.message);
+    } finally {
+      setApisLoading(false);
+    }
+  };
+
+  const openSection = (nextSection) => {
+    setSection(nextSection);
+    setNotice('');
+    if (nextSection === 'apis' && !apis) refreshApis();
+  };
+
+  const loadMoreUsers = async () => {
+    if (!nextPageToken) return;
+    setLoadingMore(true);
+    setError('');
+    try {
+      const page = await adminRequest(user, `/api/admin/users?pageToken=${encodeURIComponent(nextPageToken)}`);
+      setUsers((current) => [...current, ...page.users]);
+      setNextPageToken(page.nextPageToken);
+    } catch (requestError) {
+      console.error('No se pudieron cargar más cuentas:', requestError);
+      setError(requestError.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const updateAccountStatus = async (account) => {
+    const disabled = !account.disabled;
+    const action = disabled ? 'bloquear' : 'desbloquear';
+    if (!window.confirm(`¿Seguro que deseas ${action} la cuenta de ${account.email || account.name}?`)) return;
+    setBusyUid(account.uid);
+    setError('');
+    setNotice('');
+    try {
+      const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ disabled }),
+      });
+      setUsers((current) => current.map((item) => item.uid === account.uid ? result.user : item));
+      setNotice(result.warning || `Cuenta ${disabled ? 'bloqueada' : 'desbloqueada'} correctamente.`);
+    } catch (requestError) {
+      console.error(`No se pudo ${action} la cuenta:`, requestError);
+      setError(requestError.message);
+    } finally {
+      setBusyUid('');
+    }
+  };
+
+  const deleteAccount = async (account) => {
+    if (!window.confirm(`Eliminar permanentemente la cuenta ${account.email || account.name}? Esta acción no se puede deshacer. Los datos guardados localmente en el dispositivo del usuario no se borran.`)) return;
+    setBusyUid(account.uid);
+    setError('');
+    setNotice('');
+    try {
+      const result = await adminRequest(user, `/api/admin/users/${encodeURIComponent(account.uid)}`, { method: 'DELETE' });
+      setUsers((current) => current.filter((item) => item.uid !== account.uid));
+      const refreshed = await refreshOverview();
+      setNotice(result?.warning || (refreshed
+        ? 'Cuenta eliminada. Los registros de uso agregado asociados también se borraron.'
+        : 'Cuenta eliminada; no se pudieron actualizar las métricas. Actualiza el panel para sincronizarlas.'));
+    } catch (requestError) {
+      console.error('No se pudo eliminar la cuenta:', requestError);
+      setError(requestError.message);
+    } finally {
+      setBusyUid('');
+    }
+  };
+
+  const normalizedSearch = search.trim().toLocaleLowerCase('es');
+  const filteredUsers = users.filter((account) => (
+    `${account.name} ${account.email}`.toLocaleLowerCase('es').includes(normalizedSearch)
+  ));
+  const formatApiDate = (value) => value
+    ? new Intl.DateTimeFormat('es-PE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value))
+    : 'Sin datos';
+  const sections = [
+    { id: 'summary', label: 'Resumen', icon: LayoutDashboard },
+    { id: 'users', label: 'Usuarios', icon: Users },
+    { id: 'apis', label: 'Estado de APIs', icon: Activity },
+    { id: 'security', label: 'Seguridad', icon: ShieldCheck },
+  ];
+
+  return (
+    <section className="admin-panel" aria-label="Panel administrativo">
+      <nav className="admin-tabs" aria-label="Secciones administrativas">
+        {sections.map(({ id, label, icon: Icon }) => (
+          <button key={id} type="button" className={`admin-tab ${section === id ? 'active' : ''}`} onClick={() => openSection(id)}>
+            <Icon size={16} /><span>{label}</span>
+          </button>
+        ))}
+        <button type="button" className="admin-refresh" onClick={section === 'apis' ? refreshApis : refreshOverview} aria-label="Actualizar panel">
+          <RefreshCw size={16} />
+        </button>
+      </nav>
+
+      {error && <p className="admin-message is-error" role="alert">{error}</p>}
+      {notice && <p className="admin-message" role="status">{notice}</p>}
+      {loading && section !== 'apis' && <p className="admin-loading" role="status">Cargando datos administrativos…</p>}
+
+      {section === 'summary' && !loading && metrics && (
+        <div className="admin-section">
+          <div className="admin-section-heading">
+            <div><span className="section-kicker">VISTA GENERAL</span><h2>Resumen de la comunidad</h2></div>
+            <span className="admin-updated">Usuarios activos: últimos inicios de sesión de hoy (UTC)</span>
+          </div>
+          <div className="admin-metrics">
+            {[
+              { label: 'Usuarios totales', value: metrics?.totalUsers, icon: Users, tone: 'green' },
+              { label: 'Nuevos esta semana', value: metrics?.newUsersThisWeek, icon: Sparkles, tone: 'amber' },
+              { label: 'Activos hoy', value: metrics?.activeToday, icon: Activity, tone: 'blue' },
+              { label: 'Comidas registradas', value: metrics?.totalMeals, icon: Salad, tone: 'green' },
+              { label: 'Rutinas generadas', value: metrics?.totalRoutines, icon: Dumbbell, tone: 'violet' },
+            ].map(({ label, value, icon: Icon, tone }) => (
+              <article className="admin-metric-card" key={label}>
+                <span className={`admin-metric-icon ${tone}`}><Icon size={18} /></span>
+                <span>{label}</span><strong>{Number(value || 0).toLocaleString('es-PE')}</strong>
+              </article>
+            ))}
+          </div>
+          <p className="admin-footnote">Los totales de comidas y rutinas cuentan únicamente registros nuevos desde que se habilitó el seguimiento. Los datos personales de salud y finanzas no se recopilan ni se muestran aquí.</p>
+        </div>
+      )}
+      {section === 'summary' && !loading && !metrics && (
+        <p className="admin-loading" role="status">No se pudieron cargar las métricas administrativas.</p>
+      )}
+
+      {section === 'users' && (
+        <div className="admin-section">
+          <div className="admin-section-heading">
+            <div><span className="section-kicker">CUENTAS</span><h2>Administrar usuarios</h2></div>
+            <label className="admin-search"><Search size={16} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar nombre o correo" aria-label="Buscar usuario" /></label>
+          </div>
+          <div className="admin-table-wrap">
+            <table className="admin-users-table">
+              <thead><tr><th>Usuario</th><th>Correo</th><th>Registro</th><th>Estado</th><th>Acciones</th></tr></thead>
+              <tbody>
+                {filteredUsers.map((account) => (
+                  <tr key={account.uid}>
+                    <td data-label="Usuario">{account.name}</td>
+                    <td data-label="Correo">{account.email || '—'}</td>
+                    <td data-label="Registro">{formatApiDate(account.createdAt)}</td>
+                    <td data-label="Estado"><span className={`admin-user-state ${account.disabled ? 'blocked' : 'enabled'}`}>{account.disabled ? 'Bloqueado' : 'Activo'}{account.admin ? ' · Admin' : ''}</span></td>
+                    <td data-label="Acciones">
+                      {account.admin ? <span className="admin-protected-user">Cuenta protegida</span> : (
+                        <div className="admin-user-actions">
+                          <button type="button" className="admin-action-button" onClick={() => updateAccountStatus(account)} disabled={busyUid === account.uid}>
+                            {account.disabled ? <Unlock size={14} /> : <Lock size={14} />}
+                            {account.disabled ? 'Desbloquear' : 'Bloquear'}
+                          </button>
+                          <button type="button" className="admin-action-button danger" onClick={() => deleteAccount(account)} disabled={busyUid === account.uid}>
+                            <Trash2 size={14} />Eliminar
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {!filteredUsers.length && <tr><td className="admin-empty" colSpan="5">{users.length ? 'No hay coincidencias en las cuentas cargadas.' : error ? 'No se pudo cargar la lista de cuentas.' : 'No se encontraron cuentas.'}</td></tr>}
+              </tbody>
+            </table>
+          </div>
+          {nextPageToken && <button type="button" className="admin-load-more" onClick={loadMoreUsers} disabled={loadingMore}>{loadingMore ? 'Cargando…' : 'Cargar más cuentas'}</button>}
+        </div>
+      )}
+
+      {section === 'apis' && (
+        <div className="admin-section">
+          <div className="admin-section-heading">
+            <div><span className="section-kicker">MONITOREO</span><h2>Estado de servicios externos</h2></div>
+            {apis?.checkedAt && <span className="admin-updated">Revisado {formatApiDate(apis.checkedAt)}</span>}
+          </div>
+          {!apis ? (apisLoading
+            ? <p className="admin-loading" role="status">Comprobando proveedores…</p>
+            : <button type="button" className="admin-load-more" onClick={refreshApis}>Volver a comprobar</button>) : (
+            <div className="admin-api-grid">
+              <article className="admin-api-card">
+                <div className="admin-api-heading"><span className={`admin-api-dot ${apis.youtube.status}`} /><div><h3>YouTube</h3><span>{apis.youtube.status === 'online' ? 'Responde' : 'Sin respuesta'}</span></div></div>
+                <p>{apis.youtube.detail}</p>
+                <small>Consumo estimado de cuota de YouTube Data API: {apis.youtube.dataApiQuotaEstimate} solicitudes.</small>
+              </article>
+              <article className="admin-api-card">
+                <div className="admin-api-heading"><span className={`admin-api-dot ${apis.weather.status}`} /><div><h3>Clima</h3><span>{apis.weather.status === 'online' ? `Disponible · ${apis.weather.source}` : 'No disponible / dato anterior'}</span></div></div>
+                <p>{apis.weather.detail}</p>
+                <small>Solicitudes desde que inició el backend: Open-Meteo {apis.weather.requestsSinceStart.openMeteo} · wttr.in {apis.weather.requestsSinceStart.wttr}. Es una estimación; puede reiniciarse al desplegar.</small>
+              </article>
+            </div>
+          )}
+        </div>
+      )}
+
+      {section === 'security' && (
+        <div className="admin-section">
+          <div className="admin-section-heading"><div><span className="section-kicker">CONTROL DE ACCESO</span><h2>Seguridad del panel</h2></div></div>
+          <div className="admin-security-card">
+            <span className="admin-security-icon"><ShieldCheck size={23} /></span>
+            <div><strong>{isAdmin ? 'Rol de administrador verificado' : 'Sin rol de administrador'}</strong><p>El token de Firebase incluye la custom claim <code>admin: true</code>. El backend verifica la firma y el rol en cada operación privilegiada.</p></div>
+          </div>
+          <div className="admin-security-grid">
+            <article><strong>Firestore</strong><p>Reglas desplegadas: solo administradores pueden leer los contadores agregados; las escrituras pasan por el backend autenticado.</p></article>
+            <article><strong>Datos personales</strong><p>No se exponen edad, peso, talla, calorías, finanzas, calendario, comidas ni rutinas individuales en el panel.</p></article>
+            <article><strong>Cuentas admin</strong><p>Las cuentas de administradores no se pueden bloquear ni eliminar desde esta interfaz.</p></article>
+          </div>
+          <button type="button" className="admin-load-more" onClick={onRefreshClaim}>Volver a comprobar mi rol</button>
+        </div>
+      )}
+    </section>
+  );
+}
 
 const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 function normalizeGeneratedWorkouts(workouts) {
@@ -353,6 +639,16 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminLoginMode, setAdminLoginMode] = useState(false);
+  const [showLogoutDialog, setShowLogoutDialog] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
+  const [authMode, setAuthMode] = useState('login');
+  const [authName, setAuthName] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authPasswordConfirmation, setAuthPasswordConfirmation] = useState('');
   const [showCurtain, setShowCurtain] = useState(false);
   const [profile, setProfile] = useState(() => readStored(STORAGE_KEYS.profile, { name: 'Nicol', onboarded: false }));
   const [tourStep, setTourStep] = useState(() => {
@@ -651,6 +947,111 @@ export default function App() {
     setTourStep(-1);
   };
 
+  const trackAdminActivity = async (type, recordId) => {
+    if (!auth?.currentUser || auth.currentUser.uid === 'local-demo-user') return;
+    const token = await auth.currentUser.getIdToken();
+    const response = await fetch(apiUrl('/api/admin/activity'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ type, recordId }),
+    });
+    if (!response.ok) {
+      const responseText = await response.text();
+      let result;
+      try {
+        result = JSON.parse(responseText);
+      } catch {
+        throw new Error('El backend no devolvió un error legible al actualizar el conteo agregado.');
+      }
+      throw new Error(result.error || 'No se pudo actualizar el conteo agregado.');
+    }
+  };
+
+  const enterDemoWorkspace = () => {
+    setIsAdmin(false);
+    const demoUser = {
+      uid: 'local-demo-user',
+      displayName: 'Usuario demo',
+      email: 'demo@local.test',
+      photoURL: '',
+    };
+    const accountId = demoUser.uid;
+    const userProfile = readUserStored(accountId, STORAGE_KEYS.profile, { name: demoUser.displayName, onboarded: true }, demoUser.displayName);
+    const savedHabits = readUserStored(accountId, STORAGE_KEYS.habits, []);
+    const savedBudget = readUserStored(accountId, STORAGE_KEYS.foodBudget, 0);
+    setProfile({ ...userProfile, name: userProfile.name || demoUser.displayName, accountId, email: demoUser.email, photoURL: demoUser.photoURL });
+    setTourStep(userProfile.onboarded ? -1 : 0);
+    setHabits(Array.isArray(savedHabits) ? savedHabits : []);
+    setEvents(readUserStored(accountId, STORAGE_KEYS.events, []));
+    setHistory(readUserStored(accountId, STORAGE_KEYS.history, []));
+    setIngreso(readUserStored(accountId, STORAGE_KEYS.income, 0));
+    setFixedCosts(readUserStored(accountId, STORAGE_KEYS.fixedCosts, []));
+    setFoodBudget(savedBudget);
+    const savedBodyProfile = readUserStored(accountId, STORAGE_KEYS.bodyProfile, { weight: '', height: '', sex: '', age: '' });
+    setBodyProfile({
+      ...savedBodyProfile,
+      sex: savedBodyProfile.sex === 'mujer' ? 'femenino' : savedBodyProfile.sex === 'hombre' ? 'masculino' : savedBodyProfile.sex,
+    });
+    setWorkoutPreference(readUserStored(accountId, STORAGE_KEYS.workoutPreference, 'casa'));
+    const savedMeals = readUserStored(accountId, STORAGE_KEYS.mealPlans, []);
+    setMealPlans(Array.isArray(savedMeals) ? savedMeals.filter((meal) => !meal.generatedRecommendation) : []);
+    setGeneratedWorkouts(normalizeGeneratedWorkouts(readUserStored(accountId, STORAGE_KEYS.generatedWorkouts, null)));
+    setHabitDate(readUserStored(accountId, STORAGE_KEYS.habitDate, localDate()));
+    setNotifiedEvents(readUserStored(accountId, STORAGE_KEYS.notifiedEvents, []));
+    setExpenses(readUserStored(accountId, STORAGE_KEYS.expenses, []));
+    setActividad('Desarrollo de plataformas web');
+    setHoras(4);
+    setAnimo(8);
+    setComidaNombre('Pechuga a la plancha con arroz');
+    setCostoComida(8.5);
+    setEjercicio('');
+    setEjercicioCumplido(false);
+    setDuracionEjercicio(30);
+    setIntensidadEjercicio(3);
+    setProductividadEjercicio(3);
+    setGastoUSD(10);
+    setCiudad('Cusco');
+    setExpenseName('');
+    setExpenseAmount('');
+    setExpenseCategory(expenseCategories[0]);
+    setFixedName('');
+    setFixedAmount('');
+    setFixedDueDate(localDate());
+    setMealType(mealTypes[0]);
+    setMealName('');
+    setMealCost('');
+    setMealDate(localDate());
+    setMealFiber('');
+    setMealSodium('');
+    setMealAddedSugar('');
+    setMealMicronutrients('');
+    setMealEnergy('');
+    setMealProtein('');
+    setMealCarbohydrates('');
+    setMealFat('');
+    setMealNutritionEstimate(null);
+    setMealNutritionError('');
+    setEventoNombre('');
+    setEventoFecha(localDate());
+    setEventMode('horas');
+    setHoraIn('09:00');
+    setHoraOut('10:00');
+    setStatusSelect('amber');
+    setNewHabitName('');
+    setNewHabitDetail('');
+    setEditingHabitId(null);
+    setSelectedRecipeVideo(0);
+    setSelectedDate(new Date());
+    setSelectedWorkoutDay((new Date().getDay() + 6) % 7);
+    setDataApi(null);
+    setWeatherApi(null);
+    setApiError('');
+    setWorkoutRecommendationMessage('');
+    setNotification('');
+    setIsLoggedIn(true);
+    setShowCurtain(true);
+  };
+
   const enterWorkspace = (user) => {
     const accountId = user.uid;
     const name = readUserStored(accountId, STORAGE_KEYS.profile, null, user.displayName || '')?.name
@@ -735,8 +1136,10 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!auth) {
+    if (!auth || !firebaseConfigured) {
+      enterDemoWorkspace();
       setAuthReady(true);
+      setAuthError('');
       return undefined;
     }
     getRedirectResult(auth).catch((error) => {
@@ -747,8 +1150,16 @@ export default function App() {
       if (user) {
         setAuthError('');
         enterWorkspace(user);
+        user.getIdTokenResult().then((tokenResult) => {
+          setIsAdmin(tokenResult.claims.admin === true);
+        }).catch((error) => {
+          console.error('No se pudo comprobar el rol administrativo:', error);
+          setIsAdmin(false);
+          setAuthError('No se pudo comprobar el acceso administrativo. Vuelve a iniciar sesión.');
+        });
       } else {
         setIsLoggedIn(false);
+        setIsAdmin(false);
         setShowCurtain(false);
         setNotificationsOpen(false);
         setTourStep(-1);
@@ -760,6 +1171,23 @@ export default function App() {
       setAuthReady(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!isAdmin && vista === 'admin') setVista('inicio');
+  }, [isAdmin, vista]);
+
+  const refreshAdminClaim = async () => {
+    if (!auth?.currentUser) return;
+    try {
+      const tokenResult = await auth.currentUser.getIdTokenResult(true);
+      setIsAdmin(tokenResult.claims.admin === true);
+      setAuthError('');
+    } catch (error) {
+      console.error('No se pudo actualizar el rol administrativo:', error);
+      setAuthError('No se pudo comprobar tu rol. Vuelve a iniciar sesión.');
+      setIsAdmin(false);
+    }
+  };
 
   const signInWithGoogle = async () => {
     if (!auth) {
@@ -789,14 +1217,154 @@ export default function App() {
     }
   };
 
-  const switchUser = async () => {
-    if (!auth) return;
+  const openAdminLogin = () => {
+    setAdminLoginMode(true);
+    setAuthMode('login');
     setAuthError('');
+    setAuthNotice('');
+    setAuthPassword('');
+    setAuthPasswordConfirmation('');
+  };
+
+  const openAdminEntry = () => {
+    if (isAdmin) {
+      setNotification('');
+      setVista('admin');
+    } else if (isLoggedIn) {
+      setNotification('No tienes permisos de administrador');
+    } else {
+      openAdminLogin();
+    }
+  };
+
+  const returnToHome = () => {
+    setAdminLoginMode(false);
+    setAuthMode('login');
+    setAuthError('');
+    setAuthNotice('');
+    setAuthPassword('');
+    setAuthPasswordConfirmation('');
+  };
+
+  const submitEmailAuth = async (event) => {
+    event.preventDefault();
+    if (!auth) {
+      setAuthError('La autenticación no está disponible. Comprueba la configuración de Firebase.');
+      return;
+    }
+    if (authMode === 'register' && authPassword !== authPasswordConfirmation) {
+      setAuthError('Las contraseñas no coinciden.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
     try {
-      await signOut(auth);
+      if (authMode === 'register') {
+        const credential = await createUserWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        const displayName = authName.trim();
+        if (displayName) await updateProfile(credential.user, { displayName });
+        enterWorkspace(credential.user);
+      } else if (adminLoginMode) {
+        const credential = await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+        const tokenResult = await credential.user.getIdTokenResult(true);
+        if (tokenResult.claims.admin !== true) {
+          await signOut(auth);
+          setIsAdmin(false);
+          setIsLoggedIn(false);
+          setAuthError('No tienes permisos de administrador');
+          return;
+        }
+        enterWorkspace(credential.user);
+        setIsAdmin(true);
+        setShowCurtain(false);
+        setTourStep(-1);
+        setVista('admin');
+        setAdminLoginMode(false);
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail.trim(), authPassword);
+      }
     } catch (error) {
-      console.error('No se pudo cerrar la sesión de Google:', error);
-      setAuthError('No se pudo cerrar la sesión. Inténtalo otra vez.');
+      console.error(`No se pudo ${authMode === 'register' ? 'crear la cuenta' : 'iniciar sesión'} con correo:`, error);
+      setAuthError(error.code === 'auth/email-already-in-use'
+        ? 'Ya existe una cuenta con este correo. Inicia sesión o recupera tu contraseña.'
+        : error.code === 'auth/invalid-email'
+          ? 'Escribe un correo electrónico válido.'
+          : error.code === 'auth/weak-password'
+            ? 'La contraseña debe tener al menos 6 caracteres.'
+            : error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password'
+              ? 'El correo o la contraseña no son correctos.'
+              : error.code === 'auth/operation-not-allowed'
+                ? 'Activa el proveedor Correo electrónico/Contraseña en Firebase Authentication.'
+                : error.code === 'auth/too-many-requests'
+                  ? 'Hubo demasiados intentos. Espera un momento y vuelve a probar.'
+                  : 'No se pudo completar el acceso. Comprueba tu conexión e inténtalo otra vez.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const resetEmailPassword = async () => {
+    if (!auth) {
+      setAuthError('La autenticación no está disponible. Comprueba la configuración de Firebase.');
+      return;
+    }
+    if (!authEmail.trim()) {
+      setAuthError('Escribe tu correo para enviarte el enlace de recuperación.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthError('');
+    setAuthNotice('');
+    try {
+      await sendPasswordResetEmail(auth, authEmail.trim());
+      setAuthNotice('Si hay una cuenta asociada a ese correo, recibirás un enlace para restablecer la contraseña.');
+    } catch (error) {
+      console.error('No se pudo enviar el correo para restablecer la contraseña:', error);
+      setAuthError(error.code === 'auth/invalid-email'
+        ? 'Escribe un correo electrónico válido.'
+        : error.code === 'auth/too-many-requests'
+          ? 'Hubo demasiados intentos. Espera un momento y vuelve a probar.'
+          : 'No se pudo enviar el enlace. Comprueba el correo e inténtalo otra vez.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const changeAuthMode = (mode) => {
+    setAuthMode(mode);
+    setAuthError('');
+    setAuthNotice('');
+    setAuthPassword('');
+    setAuthPasswordConfirmation('');
+  };
+
+  const switchUser = () => {
+    setLogoutError('');
+    setShowLogoutDialog(true);
+  };
+
+  const confirmLogout = async () => {
+    setAuthLoading(true);
+    setLogoutError('');
+    try {
+      if (auth?.currentUser) await signOut(auth);
+      setIsAdmin(false);
+      setIsLoggedIn(false);
+      setAdminLoginMode(false);
+      setShowLogoutDialog(false);
+      setVista('inicio');
+      setTourStep(-1);
+      setNotificationsOpen(false);
+      setShowCurtain(false);
+      setAuthMode('login');
+      setAuthPassword('');
+      setAuthPasswordConfirmation('');
+    } catch (error) {
+      console.error('No se pudo cerrar la sesión:', error);
+      setLogoutError('No se pudo cerrar la sesión. Inténtalo otra vez.');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -950,8 +1518,9 @@ export default function App() {
     const addedSugar = optionalAmount(mealAddedSugar);
     if ([energy, protein, carbohydrates, fat, fiber, sodium, addedSugar]
       .some((value) => value !== null && (!Number.isFinite(value) || value < 0))) return;
+    const mealRecordId = `${Date.now()}`;
     setMealPlans((current) => [...current, {
-      id: `${Date.now()}`,
+      id: mealRecordId,
       type: mealType,
       name: mealName.trim(),
       cost,
@@ -973,6 +1542,10 @@ export default function App() {
       },
     }].sort((first, second) => first.date.localeCompare(second.date)));
     setNotification(`${mealTypeLabels[mealType] || mealType} añadido a tu plan para el ${dateLabel(new Date(`${mealDate}T12:00:00`), { day: 'numeric', month: 'long' })}.`);
+    trackAdminActivity('meal', mealRecordId).catch((error) => {
+      console.error('No se pudo actualizar el conteo agregado de comidas:', error);
+      setNotification('La comida se guardó en este navegador, pero no se pudo actualizar el conteo administrativo.');
+    });
     setMealName('');
     setMealCost('');
     setMealEnergy('');
@@ -1018,6 +1591,10 @@ export default function App() {
       intensity: lowImpact ? 'Bajo impacto y progresión gradual' : 'Intensidad moderada y progresiva',
       bmiContext: bmi >= 30 || bmi < 18.5,
     }));
+    trackAdminActivity('routine', `routine-${Date.now()}`).catch((error) => {
+      console.error('No se pudo actualizar el conteo agregado de rutinas:', error);
+      setNotification('La rutina se creó, pero no se pudo actualizar el conteo administrativo.');
+    });
   };
 
   const generatePersonalizedWorkouts = async () => {
@@ -1043,6 +1620,10 @@ export default function App() {
       if (!normalizedWorkouts) throw new Error('La rutina recibida no tiene un formato válido. Se mostrará una rutina de ejemplo.');
       setGeneratedWorkouts(normalizedWorkouts);
       setWorkoutRecommendationMessage(`Rutina semanal personalizada generada con ${result.provider || 'IA'} para casa y gimnasio.`);
+      trackAdminActivity('routine', `routine-${Date.now()}`).catch((trackingError) => {
+        console.error('No se pudo actualizar el conteo agregado de rutinas:', trackingError);
+        setNotification('La rutina se creó, pero no se pudo actualizar el conteo administrativo.');
+      });
     } catch (error) {
       console.error('No se pudo generar la rutina con IA:', error);
       createLocalWorkouts();
@@ -1393,6 +1974,7 @@ export default function App() {
   const backdropIcons = {
     inicio: LayoutDashboard,
     calendario: CalendarDays,
+    admin: ShieldCheck,
     'actividad-fisica': Activity,
     alimentacion: Salad,
     finanzas: Wallet,
@@ -1401,7 +1983,7 @@ export default function App() {
   };
   const ScreenBackdropIcon = backdropIcons[vista] || LayoutDashboard;
 
-  if (!isLoggedIn) {
+  if (!isLoggedIn || adminLoginMode) {
     return (
       <main className="login-screen">
         <div className="login-backdrop-orb login-orb-one" />
@@ -1410,24 +1992,132 @@ export default function App() {
         <div className="login-icon login-icon-activity"><Activity /></div>
         <div className="login-icon login-icon-food"><Salad /></div>
         <div className="login-icon login-icon-finance"><Wallet /></div>
+        {!adminLoginMode && (
+          <button className="login-admin-entry" type="button" onClick={openAdminLogin}>
+            <ShieldCheck size={16} /> Admin
+          </button>
+        )}
         <section className="login-card" aria-labelledby="login-title">
+          {adminLoginMode && (
+            <button className="login-admin-back" type="button" onClick={returnToHome}>
+              <ChevronLeft size={16} /> Volver a SyncLife
+            </button>
+          )}
           <img className="login-logo" src="/synclife-logo.png" alt="Logo de SyncLife OS" />
-          <div className="login-icon-row" aria-hidden="true">
-            {[CalendarDays, Activity, Salad, Wallet].map((Icon, index) => (
-              <span className={`login-icon-badge login-icon-badge-${index}`} key={index}><Icon size={17} /></span>
-            ))}
-          </div>
-          <span className="section-kicker">TU ESPACIO PERSONAL</span>
-          <h1 id="login-title">Bienvenido a SyncLife</h1>
-          <p>Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.</p>
+          {!adminLoginMode && (
+            <div className="login-icon-row" aria-hidden="true">
+              {[CalendarDays, Activity, Salad, Wallet].map((Icon, index) => (
+                <span className={`login-icon-badge login-icon-badge-${index}`} key={index}><Icon size={17} /></span>
+              ))}
+            </div>
+          )}
+          <span className="section-kicker">{adminLoginMode ? 'ACCESO RESTRINGIDO' : 'TU ESPACIO PERSONAL'}</span>
+          <h1 id="login-title">{adminLoginMode ? 'Administración' : authMode === 'register' ? 'Crea tu cuenta' : 'Bienvenido a SyncLife'}</h1>
+          <p>{adminLoginMode
+            ? 'Inicia sesión con una cuenta autorizada de administrador.'
+            : authMode === 'register'
+              ? 'Regístrate con tu correo para guardar tu espacio personal.'
+              : 'Organiza tus hábitos, tu bienestar y tus finanzas en un solo lugar.'}</p>
           {!authReady && <p className="login-auth-status" role="status">Comprobando tu sesión…</p>}
           {authError && <p className="login-auth-error" role="alert">{authError}</p>}
+          {authNotice && <p className="login-auth-status" role="status">{authNotice}</p>}
           {!firebaseConfigured && <p className="login-auth-error" role="alert">Falta configurar Firebase. Completa las variables VITE_FIREBASE_* en frontend/.env.local y reinicia Vite.</p>}
-          <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
-            <span className="google-mark" aria-hidden="true">G</span>
-            {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
-          </button>
-          <small>La primera vez que ingreses con Google se creará tu cuenta automáticamente. Tus datos de SyncLife se guardan por cuenta en este navegador.</small>
+          <form className="login-auth-form" onSubmit={submitEmailAuth}>
+            {!adminLoginMode && authMode === 'register' && (
+              <label className="login-field">
+                <span>Nombre</span>
+                <input
+                  type="text"
+                  autoComplete="name"
+                  value={authName}
+                  onChange={(event) => setAuthName(event.target.value)}
+                  placeholder="Tu nombre"
+                  maxLength={80}
+                  required
+                  disabled={!authReady || authLoading || !firebaseConfigured}
+                />
+              </label>
+            )}
+            <label className="login-field">
+              <span>Correo electrónico</span>
+              <input
+                type="email"
+                autoComplete="email"
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="tu@correo.com"
+                required
+                disabled={!authReady || authLoading || !firebaseConfigured}
+              />
+            </label>
+            <label className="login-field">
+              <span>Contraseña</span>
+              <input
+                type="password"
+                autoComplete={!adminLoginMode && authMode === 'register' ? 'new-password' : 'current-password'}
+                value={authPassword}
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder={!adminLoginMode && authMode === 'register' ? 'Mínimo 6 caracteres' : 'Tu contraseña'}
+                minLength={6}
+                required
+                disabled={!authReady || authLoading || !firebaseConfigured}
+              />
+            </label>
+            {!adminLoginMode && authMode === 'register' && (
+              <label className="login-field">
+                <span>Confirmar contraseña</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={authPasswordConfirmation}
+                  onChange={(event) => setAuthPasswordConfirmation(event.target.value)}
+                  placeholder="Repite tu contraseña"
+                  minLength={6}
+                  required
+                  disabled={!authReady || authLoading || !firebaseConfigured}
+                />
+              </label>
+            )}
+            {authMode === 'login' && (
+              <button
+                className="login-text-button login-forgot-button"
+                type="button"
+                onClick={resetEmailPassword}
+                disabled={!authReady || authLoading || !firebaseConfigured}
+              >
+                ¿Olvidaste tu contraseña?
+              </button>
+            )}
+            <button className="login-submit" type="submit" disabled={!authReady || authLoading || !firebaseConfigured}>
+              {authLoading
+                ? (!adminLoginMode && authMode === 'register' ? 'Creando cuenta…' : 'Ingresando…')
+                : (!adminLoginMode && authMode === 'register' ? 'Crear cuenta' : 'Iniciar sesión')}
+            </button>
+          </form>
+          {!adminLoginMode && (
+            <>
+              <div className="login-divider"><span>o continúa con</span></div>
+              <button className="login-submit google-login-button" type="button" onClick={signInWithGoogle} disabled={!authReady || authLoading || !firebaseConfigured}>
+                <span className="google-mark" aria-hidden="true">G</span>
+                {authLoading ? 'Conectando con Google…' : 'Continuar con Google'}
+              </button>
+              <p className="login-mode-switch">
+                {authMode === 'register' ? '¿Ya tienes una cuenta?' : '¿Aún no tienes una cuenta?'}
+                {' '}
+                <button className="login-text-button" type="button" onClick={() => changeAuthMode(authMode === 'register' ? 'login' : 'register')}>
+                  {authMode === 'register' ? 'Inicia sesión' : 'Regístrate'}
+                </button>
+              </p>
+            </>
+          )}
+          {!adminLoginMode && (!firebaseConfigured || authError) && (
+            <button className="login-submit secondary-login-button" type="button" onClick={enterDemoWorkspace}>
+              Usar vista demo
+            </button>
+          )}
+          <small>{adminLoginMode
+            ? 'El acceso administrativo se verifica con el rol asignado en Firebase.'
+            : 'Con Google o correo, tus datos de SyncLife se guardan por cuenta en este navegador.'}</small>
         </section>
       </main>
     );
@@ -1473,6 +2163,11 @@ export default function App() {
               </button>
             )
           ))}
+          {isAdmin && (
+              <button className={`btn-side ${vista === 'admin' ? 'active' : ''}`} onClick={() => setVista('admin')} aria-current={vista === 'admin' ? 'page' : undefined}>
+                <ShieldCheck size={18} strokeWidth={1.8} /><span>Administración</span>
+              </button>
+          )}
         </nav>
 
         <div className="sidebar-card">
@@ -1504,6 +2199,7 @@ export default function App() {
               finanzas: 'Tu dinero, con claridad',
               registro: `${profile.name}, tu día con intención`,
               analisis: `Tu progreso, ${profile.name}`,
+              admin: 'Panel administrativo',
             })[vista]}</h1>
             <p>{({
               inicio: 'Una vista clara de tu tiempo, tu bienestar y tu presupuesto.',
@@ -1513,9 +2209,13 @@ export default function App() {
               finanzas: 'Planifica tu presupuesto mensual y anticipa tus próximos pagos.',
               registro: 'Registra tu día para actualizar tu resumen personal.',
               analisis: 'Consulta los datos de tus registros sincronizados.',
+              admin: 'Indicadores agregados, cuentas y estado de servicios.',
             })[vista]}</p>
           </div>
           <div className="header-actions">
+            <button className="admin-entry-button" type="button" onClick={openAdminEntry}>
+              <ShieldCheck size={15} /> Admin
+            </button>
             <div
               className="api-status"
               title={dataApi?.serviciosDisponibles === false ? 'Backend no disponible. Se muestran cálculos locales aproximados; clima, tipo de cambio y nutrición no están sincronizados.' : undefined}
@@ -1549,7 +2249,26 @@ export default function App() {
 
         {apiError && dataApi?.serviciosDisponibles !== false && <div className="alert-banner" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Cerrar alerta">×</button></div>}
         {notification && <div className="toast-message" role="status">{notification}<button onClick={() => setNotification('')} aria-label="Cerrar notificación">×</button></div>}
+        {showLogoutDialog && (
+          <div className="logout-dialog-backdrop">
+            <section className="logout-dialog" role="dialog" aria-modal="true" aria-labelledby="logout-dialog-title">
+              <span className="logout-dialog-icon"><LogOut size={20} /></span>
+              <h2 id="logout-dialog-title">¿Cerrar sesión?</h2>
+              <p>Volverás a la portada de SyncLife.</p>
+              {logoutError && <p className="login-auth-error" role="alert">{logoutError}</p>}
+              <div className="logout-dialog-actions">
+                <button type="button" className="logout-cancel-button" onClick={() => setShowLogoutDialog(false)} disabled={authLoading}>Cancelar</button>
+                <button type="button" className="logout-confirm-button" onClick={confirmLogout} disabled={authLoading}>
+                  {authLoading ? 'Saliendo…' : 'Sí, salir'}
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
 
+        {vista === 'admin' && isAdmin && (
+          <AdminPanel user={auth?.currentUser} isAdmin={isAdmin} onRefreshClaim={refreshAdminClaim} />
+        )}
         {vista === 'inicio' && (
           <>
             <section className="module-shortcuts" aria-label="Módulos principales">

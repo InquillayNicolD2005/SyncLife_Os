@@ -1,4 +1,9 @@
 backend/.env
+backend/serviceAccountKey.json
+backend/*service-account*.json
+*-firebase-adminsdk-*.json
+serviceAccount*.json
 frontend/.env.local
+*.service-account.json
 node_modules/
 frontend/dist/

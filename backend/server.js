@@ -6,6 +6,7 @@ const path = require('path');
 const envPath = path.join(__dirname, '.env');
 
 const { obtenerClima, convertirMoneda, analizarNutricion, generarDiagnostico, guardarRegistroDB } = require('./synclife');
+const adminRoutes = require('./admin-routes');
 
 const app = express();
 const localOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
@@ -21,6 +22,7 @@ app.use(cors({
   },
 }));
 app.use(express.json());
+app.use('/api/admin', adminRoutes);
 
 function readLocalEnvironment() {
   if (!fs.existsSync(envPath)) return {};
