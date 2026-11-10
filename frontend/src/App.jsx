@@ -87,7 +87,10 @@ async function adminRequest(user, path, options = {}) {
       throw new Error('El backend devolvió una respuesta que no se pudo leer.');
     }
   }
-  if (!response.ok) throw new Error(result.error || 'No se pudo completar la solicitud administrativa.');
+  if (!response.ok) {
+    const message = result.error || 'No se pudo completar la solicitud administrativa.';
+    throw new Error(result.stage ? `${message} (etapa: ${result.stage})` : message);
+  }
   return result;
 }
 

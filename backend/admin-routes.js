@@ -21,12 +21,25 @@ const ADMIN_RECORDS_COLLECTION = 'adminRecords';
 const validActivityTypes = new Set(['meal', 'routine', 'exercise', 'daily-record']);
 let firebaseAccountSync;
 
-function sendAdminError(res, error, fallbackMessage) {
+function sendAdminError(res, error, fallbackMessage, stage = null) {
   console.error(fallbackMessage, error);
+  const responseStage = stage ? { stage } : {};
+  if (error.code === 'firebase/project-mismatch'
+    || error.code === 'firebase/invalid-service-account-json'
+    || error.code === 'firebase/incomplete-service-account'
+    || error.code === 'firebase/missing-service-account'
+    || error.code === 'app/invalid-credential'
+    || error.code === 'app/invalid-app-credential') {
+    return res.status(503).json({
+      error: 'La credencial Firebase Admin de Render falta o no es válida. Configura FIREBASE_PROJECT_ID y el JSON de servicio del proyecto synclife-os-b2daf.',
+      ...responseStage,
+    });
+  }
   if (error.code === 'auth/insufficient-permission' || error.code === 'permission-denied'
     || error.code === 7) {
     return res.status(503).json({
       error: 'La cuenta de servicio de Firebase en Render necesita permisos de Firebase Authentication Admin para gestionar usuarios.',
+      ...responseStage,
     });
   }
   if (error.code === 'auth/id-token-expired' || error.code === 'auth/invalid-id-token'
@@ -36,8 +49,8 @@ function sendAdminError(res, error, fallbackMessage) {
   if (error.code === 'auth/user-disabled' || error.code === 'auth/user-not-found') {
     return res.status(403).json({ error: 'La cuenta ya no puede acceder al panel.' });
   }
-  if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
-  return res.status(503).json({ error: fallbackMessage });
+  if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...responseStage });
+  return res.status(503).json({ error: fallbackMessage, ...responseStage });
 }
 
 async function authenticate(req, res, next) {
@@ -45,16 +58,24 @@ async function authenticate(req, res, next) {
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   if (!match) return res.status(401).json({ error: 'Se requiere una sesión autenticada.' });
 
+  let stage = 'firebase-admin-initialize';
   try {
     const { auth } = getAdminServices();
+    stage = 'firebase-token-verification';
     const decodedToken = await auth.verifyIdToken(match[1], true);
+    stage = 'firebase-user-lookup';
     const user = await auth.getUser(decodedToken.uid);
     if (user.disabled) return res.status(403).json({ error: 'Esta cuenta está deshabilitada.' });
     req.authUser = user;
     req.authToken = decodedToken;
     return next();
   } catch (error) {
-    return sendAdminError(res, error, 'No se pudo validar la sesión. Configura Firebase Admin en el backend.');
+    return sendAdminError(
+      res,
+      error,
+      'Firebase Admin no pudo validar la sesión. Revisa las credenciales del backend en Render.',
+      stage,
+    );
   }
 }
 

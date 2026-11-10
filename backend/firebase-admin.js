@@ -7,6 +7,12 @@ function getAdminServices() {
   if (!getApps().length) {
     let serviceAccount;
     const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    if (!rawServiceAccount && (process.env.RENDER || process.env.RENDER_SERVICE_ID)
+      && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      const error = new Error('Configura FIREBASE_SERVICE_ACCOUNT_JSON para inicializar Firebase Admin en Render.');
+      error.code = 'firebase/missing-service-account';
+      throw error;
+    }
     if (rawServiceAccount) {
       try {
         serviceAccount = JSON.parse(rawServiceAccount);
