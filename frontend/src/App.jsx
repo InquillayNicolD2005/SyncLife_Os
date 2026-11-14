@@ -62,7 +62,7 @@ const changeAdminRole = async (action) => {
 
 const API_BASE_URL = (
   import.meta.env.VITE_API_URL
-  || (import.meta.env.PROD ? 'https://synclife-os.onrender.com' : '')
+  || (import.meta.env.PROD ? 'https://synclife-api-anfgd9hvaybmd5bd.chilecentral-01.azurewebsites.net' : '')
 ).replace(/\/+$/, '');
 const apiUrl = (path) => `${API_BASE_URL}${path}`;
 
